@@ -677,7 +677,7 @@ Write-JsonFile "$defDir/report.json" ([ordered]@{
     themeCollection = @{
         baseTheme = [ordered]@{
             name = "CY24SU10"
-            reportVersionAtImport = [ordered]@{ visual = "1.8.90"; report = "2.0.90"; page = "1.3.90" }
+            reportVersionAtImport = "5.55"
             type = "SharedResources"
         }
     }
