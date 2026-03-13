@@ -452,6 +452,9 @@ foreach ($env in $environments) {
             function Get-StepEndpointUrl {
                 param($Inputs)
                 if (-not $Inputs) { return "" }
+                # Inputs can be a scalar (Compose actions) — only process objects
+                if ($Inputs -is [string] -or $Inputs -is [int] -or $Inputs -is [bool] -or
+                    $null -eq $Inputs.PSObject) { return "" }
                 $params = $null
                 if ($Inputs.PSObject.Properties.Name -contains 'parameters') { $params = $Inputs.parameters }
 
@@ -461,6 +464,8 @@ foreach ($env in $environments) {
                     if ($Inputs.PSObject.Properties.Name -contains 'url') { return "$($Inputs.url)" }
                     return ""
                 }
+                # params could also be a non-object (expression string)
+                if ($params -is [string] -or $null -eq $params.PSObject) { return "" }
 
                 # SharePoint: dataset = site URL
                 if ($params.PSObject.Properties.Name -contains 'dataset') {
@@ -494,8 +499,13 @@ foreach ($env in $environments) {
             function Get-StepHostInfo {
                 param($Inputs)
                 $info = @{ ConnectorId = ""; OperationId = ""; ConnectionName = "" }
-                if (-not $Inputs -or -not ($Inputs.PSObject.Properties.Name -contains 'host')) { return $info }
+                if (-not $Inputs) { return $info }
+                # Inputs can be a scalar (Compose actions) — only process objects
+                if ($Inputs -is [string] -or $Inputs -is [int] -or $Inputs -is [bool] -or
+                    $null -eq $Inputs.PSObject) { return $info }
+                if (-not ($Inputs.PSObject.Properties.Name -contains 'host')) { return $info }
                 $host_ = $Inputs.host
+                if (-not $host_ -or $null -eq $host_.PSObject) { return $info }
                 if ($host_.PSObject.Properties.Name -contains 'apiId') {
                     $info.ConnectorId = "$($host_.apiId)" -replace '.*/apis/', ''
                 }
@@ -508,53 +518,51 @@ foreach ($env in $environments) {
                 return $info
             }
 
-            # --- Helper: recursively flatten actions from definition (handles Scope, Condition, ForEach, Switch) ---
-            function Get-FlattenedActions {
-                param($ActionsObj, [string]$FlowId, [string]$EnvId, [ref]$Pos)
-                $results = [System.Collections.Generic.List[PSCustomObject]]::new()
-                if (-not $ActionsObj) { return $results }
+            # --- Helper: recursively write actions from definition to CSV ---
+            # Writes directly to CSV instead of returning a list (avoids PowerShell pipeline
+            # unrolling which turns List<T> into $null/single-object on return)
+            function Write-FlattenedActions {
+                param($ActionsObj, [string]$FlowId, [string]$EnvId, [string]$OutPath, [ref]$Pos, [ref]$Count)
+                if (-not $ActionsObj -or $null -eq $ActionsObj.PSObject) { return }
                 foreach ($prop in $ActionsObj.PSObject.Properties) {
                     $stepName = $prop.Name
                     $step = $prop.Value
+                    if (-not $step -or $null -eq $step.PSObject) { continue }
                     $stepType = if ($step.PSObject.Properties.Name -contains 'type') { $step.type } else { "Unknown" }
                     $inputs = if ($step.PSObject.Properties.Name -contains 'inputs') { $step.inputs } else { $null }
                     $hostInfo = Get-StepHostInfo $inputs
                     $epUrl = Get-StepEndpointUrl $inputs
 
-                    $results.Add([PSCustomObject]@{
+                    Append-CsvRow "$OutPath/FlowActions.csv" ([PSCustomObject]@{
                         FlowId=$FlowId; EnvironmentId=$EnvId; Position=$Pos.Value; Name=$stepName
                         ActionType=$stepType; ConnectorId=$hostInfo.ConnectorId
                         OperationId=$hostInfo.OperationId; EndpointUrl=$epUrl
                     })
                     $Pos.Value++
+                    $Count.Value++
 
                     # Recurse into nested actions: Scope, ForEach, Until have .actions
                     if ($step.PSObject.Properties.Name -contains 'actions' -and $step.actions) {
-                        $nested = Get-FlattenedActions $step.actions $FlowId $EnvId $Pos
-                        $results.AddRange([PSCustomObject[]]$nested)
+                        Write-FlattenedActions $step.actions $FlowId $EnvId $OutPath $Pos $Count
                     }
                     # Condition: .else.actions
                     if ($step.PSObject.Properties.Name -contains 'else' -and $step.else -and
                         $step.else.PSObject.Properties.Name -contains 'actions' -and $step.else.actions) {
-                        $nested = Get-FlattenedActions $step.else.actions $FlowId $EnvId $Pos
-                        $results.AddRange([PSCustomObject[]]$nested)
+                        Write-FlattenedActions $step.else.actions $FlowId $EnvId $OutPath $Pos $Count
                     }
                     # Switch: .cases.*.actions and .default.actions
                     if ($step.PSObject.Properties.Name -contains 'cases' -and $step.cases) {
                         foreach ($caseProp in $step.cases.PSObject.Properties) {
                             if ($caseProp.Value.PSObject.Properties.Name -contains 'actions' -and $caseProp.Value.actions) {
-                                $nested = Get-FlattenedActions $caseProp.Value.actions $FlowId $EnvId $Pos
-                                $results.AddRange([PSCustomObject[]]$nested)
+                                Write-FlattenedActions $caseProp.Value.actions $FlowId $EnvId $OutPath $Pos $Count
                             }
                         }
                     }
                     if ($step.PSObject.Properties.Name -contains 'default' -and $step.default -and
                         $step.default.PSObject.Properties.Name -contains 'actions' -and $step.default.actions) {
-                        $nested = Get-FlattenedActions $step.default.actions $FlowId $EnvId $Pos
-                        $results.AddRange([PSCustomObject[]]$nested)
+                        Write-FlattenedActions $step.default.actions $FlowId $EnvId $OutPath $Pos $Count
                     }
                 }
-                return $results
             }
 
             # --- Write FlowConnectionRefs from connectionReferences ---
@@ -584,61 +592,66 @@ foreach ($env in $environments) {
             $triggerType = "Unknown"
             $usedFullDef = $false
 
-            # PREFERRED: Parse from full definition (has input parameters with actual URLs)
-            if ($flowDefinition -and $flowDefinition.PSObject.Properties.Name -contains 'triggers' -and $flowDefinition.triggers) {
-                $usedFullDef = $true
-                $pos = 0
-                foreach ($prop in $flowDefinition.triggers.PSObject.Properties) {
-                    $stepName = $prop.Name
-                    $trig = $prop.Value
-                    $tType = if ($trig.PSObject.Properties.Name -contains 'type') { $trig.type } else { "Unknown" }
-                    $inputs = if ($trig.PSObject.Properties.Name -contains 'inputs') { $trig.inputs } else { $null }
-                    $hostInfo = Get-StepHostInfo $inputs
-                    $epUrl = Get-StepEndpointUrl $inputs
-                    if ($pos -eq 0) { $triggerType = $tType }
-                    Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
-                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=$stepName
-                        TriggerType=$tType; ConnectorId=$hostInfo.ConnectorId
-                        OperationId=$hostInfo.OperationId; EndpointUrl=$epUrl
-                    })
-                    $pos++; $totalTriggers++
-                }
-
-                if ($flowDefinition.PSObject.Properties.Name -contains 'actions' -and $flowDefinition.actions) {
-                    $actionPos = [ref]0
-                    $flatActions = Get-FlattenedActions $flowDefinition.actions $f.name $envId $actionPos
-                    foreach ($act in $flatActions) {
-                        Append-CsvRow "$OutputPath/FlowActions.csv" $act
-                        $totalActions++
-                    }
-                }
-            }
-
-            # FALLBACK: Parse from definitionSummary (no URLs, but we get connector IDs)
-            if (-not $usedFullDef -and $defSummary) {
-                if ($defSummary.triggers) {
+            try {
+                # PREFERRED: Parse from full definition (has input parameters with actual URLs)
+                if ($flowDefinition -and $null -ne $flowDefinition.PSObject -and
+                    $flowDefinition.PSObject.Properties.Name -contains 'triggers' -and $flowDefinition.triggers) {
+                    $usedFullDef = $true
                     $pos = 0
-                    foreach ($t in $defSummary.triggers) {
-                        $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
-                        if ($pos -eq 0) { $triggerType = $t.type }
+                    foreach ($prop in $flowDefinition.triggers.PSObject.Properties) {
+                        $stepName = $prop.Name
+                        $trig = $prop.Value
+                        if (-not $trig -or $null -eq $trig.PSObject) { continue }
+                        $tType = if ($trig.PSObject.Properties.Name -contains 'type') { $trig.type } else { "Unknown" }
+                        $inputs = if ($trig.PSObject.Properties.Name -contains 'inputs') { $trig.inputs } else { $null }
+                        $hostInfo = Get-StepHostInfo $inputs
+                        $epUrl = Get-StepEndpointUrl $inputs
+                        if ($pos -eq 0) { $triggerType = $tType }
                         Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
-                            FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
-                            TriggerType=$t.type; ConnectorId=$tConnId; OperationId=$t.swaggerOperationId; EndpointUrl=""
+                            FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=$stepName
+                            TriggerType=$tType; ConnectorId=$hostInfo.ConnectorId
+                            OperationId=$hostInfo.OperationId; EndpointUrl=$epUrl
                         })
                         $pos++; $totalTriggers++
                     }
-                }
-                if ($defSummary.actions) {
-                    $pos = 0
-                    foreach ($a in $defSummary.actions) {
-                        $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
-                        Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
-                            FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
-                            ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=""
-                        })
-                        $pos++; $totalActions++
+
+                    if ($flowDefinition.PSObject.Properties.Name -contains 'actions' -and $flowDefinition.actions) {
+                        $actionPos = [ref]0
+                        $actionCount = [ref]0
+                        Write-FlattenedActions $flowDefinition.actions $f.name $envId $OutputPath $actionPos $actionCount
+                        $totalActions += $actionCount.Value
                     }
                 }
+
+                # FALLBACK: Parse from definitionSummary (no URLs, but we get connector IDs)
+                if (-not $usedFullDef -and $defSummary) {
+                    if ($defSummary.triggers) {
+                        $pos = 0
+                        foreach ($t in $defSummary.triggers) {
+                            $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
+                            if ($pos -eq 0) { $triggerType = $t.type }
+                            Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
+                                FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
+                                TriggerType=$t.type; ConnectorId=$tConnId; OperationId=$t.swaggerOperationId; EndpointUrl=""
+                            })
+                            $pos++; $totalTriggers++
+                        }
+                    }
+                    if ($defSummary.actions) {
+                        $pos = 0
+                        foreach ($a in $defSummary.actions) {
+                            $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
+                            Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
+                                FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
+                                ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=""
+                            })
+                            $pos++; $totalActions++
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-Host "      Warning: Failed to parse definition for flow $($f.name): $($_.Exception.Message)" -ForegroundColor DarkYellow
             }
 
             Append-CsvRow "$OutputPath/Flows.csv" ([PSCustomObject]@{
