@@ -240,9 +240,12 @@ $projectName = "PowerPlatformGovernance"
 $reportDir = "$OutputPath/$projectName.Report"
 $modelDir = "$OutputPath/$projectName.SemanticModel"
 
-# Clean up old output to avoid stale files
-if (Test-Path $reportDir) { Remove-Item $reportDir -Recurse -Force }
-if (Test-Path $modelDir) { Remove-Item $modelDir -Recurse -Force }
+# Clean up ALL old output to avoid stale files (close Power BI Desktop first!)
+Write-Host "Cleaning old output..." -ForegroundColor Yellow
+Get-ChildItem -Path $OutputPath -Directory -Filter "*.Report" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+Get-ChildItem -Path $OutputPath -Directory -Filter "*.SemanticModel" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+# Remove .pbi cache folders that Power BI Desktop creates
+Get-ChildItem -Path $OutputPath -Directory -Filter ".pbi" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 
 Write-Host "Creating PBIP project at: $OutputPath" -ForegroundColor Cyan
 
