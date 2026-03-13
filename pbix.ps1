@@ -611,6 +611,7 @@ Write-JsonFile "$defDir/version.json" ([ordered]@{
 })
 Write-JsonFile "$defDir/report.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/report/1.0.0/schema.json"
+    layoutOptimization = "None"
     themeCollection = @{ baseTheme = @{ name = "CY24SU06"; reportVersionAtImport = "5.55"; type = "SharedResources" } }
     settings = @{ useStylableVisualContainerHeader = $true; exportDataMode = "AllowSummarizedAndUnderlying" }
 })
