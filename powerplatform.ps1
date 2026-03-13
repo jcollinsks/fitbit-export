@@ -12,22 +12,22 @@
     - Streaming CSV writes per environment (low memory footprint)
     - Progress tracking with ETA
     - Error logging to Errors.csv (non-fatal — continues on per-environment failures)
+
+    For each flow, fetches the full definition to extract triggers, actions,
+    and endpoint URLs (SharePoint sites, SQL servers, HTTP endpoints, etc.).
+    This adds one API call per flow but provides complete connection mapping.
 .PARAMETER OutputPath
     Directory for CSV output files. Defaults to ./PowerPlatformExport.
-.PARAMETER IncludeFlowDefinitions
-    If set, fetches full flow definitions (triggers, actions, variables).
-    WARNING: One API call per flow — at 60K flows this adds hours. Off by default.
 .PARAMETER IncludePermissions
     If set, fetches sharing/permissions for apps and flows.
     WARNING: One API call per resource — at 100K resources this adds hours. Off by default.
 .EXAMPLE
-    .\Collect-PowerPlatformData.ps1 -OutputPath C:\exports
-    .\Collect-PowerPlatformData.ps1 -IncludeFlowDefinitions -IncludePermissions
+    .\powerplatform.ps1 -OutputPath C:\exports
+    .\powerplatform.ps1 -IncludePermissions
 #>
 
 param(
     [string]$OutputPath = "./PowerPlatformExport",
-    [switch]$IncludeFlowDefinitions,
     [switch]$IncludePermissions
 )
 
@@ -53,7 +53,7 @@ function Get-PPToken {
     $result = Get-AzAccessToken -ResourceUrl "https://service.powerapps.com/" -AsSecureString
     $script:ppToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
         [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($result.Token))
-    $script:ppTokenExpiry = [datetime]::UtcNow.AddMinutes(45)  # Refresh 15 min before expiry
+    $script:ppTokenExpiry = [datetime]::UtcNow.AddMinutes(45)
     return $script:ppToken
 }
 
@@ -159,6 +159,44 @@ function Append-CsvRows {
 }
 
 # ============================================================================
+# ENDPOINT URL EXTRACTOR — pulls URLs from flow/app action parameters
+# ============================================================================
+
+function Get-ActionEndpointUrl {
+    param($ActionInputs)
+    if (-not $ActionInputs) { return "" }
+
+    $p = $ActionInputs.parameters
+    if (-not $p) {
+        # Some actions have uri directly in inputs (e.g. HTTP)
+        if ($ActionInputs.uri) { return "$($ActionInputs.uri)" }
+        return ""
+    }
+
+    # SharePoint: dataset = site URL, siteAddress
+    if ($p.dataset) { return "$($p.dataset)" }
+    if ($p.siteAddress) { return "$($p.siteAddress)" }
+    # SQL Server: server + database
+    if ($p.server) {
+        $url = "$($p.server)"
+        if ($p.database) { $url += "/$($p.database)" }
+        return $url
+    }
+    # HTTP actions: uri
+    if ($p.uri) { return "$($p.uri)" }
+    # Dataverse / CDS: organization
+    if ($p.organization) { return "$($p.organization)" }
+    # Generic URL fields
+    if ($p.url) { return "$($p.url)" }
+    if ($p.serviceUrl) { return "$($p.serviceUrl)" }
+    if ($p.baseUrl) { return "$($p.baseUrl)" }
+    if ($p.endpoint) { return "$($p.endpoint)" }
+    if ($p.hostUrl) { return "$($p.hostUrl)" }
+    # Teams, Outlook, etc.: no meaningful URL
+    return ""
+}
+
+# ============================================================================
 # SETUP
 # ============================================================================
 
@@ -217,15 +255,16 @@ Write-Host "  Found $($environments.Count) environments" -ForegroundColor Gray
 
 # Initialize CSV files with headers
 Initialize-Csv "$OutputPath/Apps.csv" @("AppId","EnvironmentId","EnvironmentName","DisplayName","Description","AppType","OwnerObjectId","OwnerDisplayName","OwnerEmail","CreatedTime","LastModifiedTime","LastPublishedTime","AppVersion","Status","UsesPremiumApi","UsesCustomApi","SharedUsersCount","SharedGroupsCount","IsSolutionAware","SolutionId","BypassConsent","CollectedAt")
-Initialize-Csv "$OutputPath/AppConnectorRefs.csv" @("AppId","EnvironmentId","ConnectorId","DisplayName","DataSources")
+Initialize-Csv "$OutputPath/AppConnectorRefs.csv" @("AppId","EnvironmentId","ConnectorId","DisplayName","DataSources","EndpointUrl")
 Initialize-Csv "$OutputPath/Flows.csv" @("FlowId","EnvironmentId","EnvironmentName","DisplayName","Description","State","CreatorObjectId","CreatorDisplayName","CreatedTime","LastModifiedTime","TriggerType","IsSolutionAware","SolutionId","IsManaged","SuspensionReason","CollectedAt")
-Initialize-Csv "$OutputPath/FlowTriggers.csv" @("FlowId","EnvironmentId","Position","TriggerType","ConnectorId")
-Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowId","EnvironmentId","Position","ActionType","ConnectorId")
+Initialize-Csv "$OutputPath/FlowTriggers.csv" @("FlowId","EnvironmentId","Position","Name","TriggerType","ConnectorId","OperationId","EndpointUrl")
+Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowId","EnvironmentId","Position","Name","ActionType","ConnectorId","OperationId","EndpointUrl")
+Initialize-Csv "$OutputPath/FlowConnectionRefs.csv" @("FlowId","EnvironmentId","ConnectorId","ConnectionName")
 Initialize-Csv "$OutputPath/Connectors.csv" @("ConnectorId","EnvironmentId","EnvironmentName","DisplayName","Description","Publisher","Tier","IsCustom","IconUri","CollectedAt")
 Initialize-Csv "$OutputPath/Connections.csv" @("ConnectionId","ConnectorId","EnvironmentId","EnvironmentName","DisplayName","ConnectionUrl","CreatedByObjectId","CreatedByName","CreatedByEmail","CreatedTime","Status","IsShared","CollectedAt")
 
 $totalApps = 0; $totalFlows = 0; $totalConnectors = 0; $totalConnections = 0
-$totalAppConnRefs = 0; $totalTriggers = 0; $totalActions = 0
+$totalAppConnRefs = 0; $totalTriggers = 0; $totalActions = 0; $totalFlowConnRefs = 0
 $envCount = $environments.Count
 $envIndex = 0
 
@@ -265,12 +304,18 @@ foreach ($env in $environments) {
             Append-CsvRow "$OutputPath/Apps.csv" $row
             $totalApps++
 
+            # Extract connection references with endpoint URLs
             if ($app.properties.connectionReferences) {
                 foreach ($ref in $app.properties.connectionReferences.PSObject.Properties) {
                     $connId = $ref.Value.id -replace '.*/apis/', ''
+                    # Try to get endpoint URL from the connection reference dataSources
+                    $refUrl = ""
+                    if ($ref.Value.datasets) { $refUrl = ($ref.Value.datasets -join "; ") }
+                    if (-not $refUrl -and $ref.Value.dataSources) { $refUrl = ($ref.Value.dataSources -join "; ") }
                     Append-CsvRow "$OutputPath/AppConnectorRefs.csv" ([PSCustomObject]@{
                         AppId=$app.name; EnvironmentId=$envId; ConnectorId=$connId
                         DisplayName=$ref.Value.displayName; DataSources=($ref.Value.dataSources -join "; ")
+                        EndpointUrl=$refUrl
                     })
                     $totalAppConnRefs++
                 }
@@ -299,31 +344,139 @@ foreach ($env in $environments) {
             $flows = Invoke-PPApiPaged -Uri $flowsUri -Token $fToken -TokenRefresh $flowTokenRefresh
         }
         if ($flows -and $flows.Count -gt 0) {
-            Write-Host "    Found $($flows.Count) flows" -ForegroundColor DarkGray
+            Write-Host "    Found $($flows.Count) flows — fetching definitions..." -ForegroundColor DarkGray
         }
-        foreach ($f in $flows) {
-            # V2 list returns basic info. Per-flow GET for details only with -IncludeFlowDefinitions.
-            $triggers = $null
-            $actions = $null
-            $creatorId = ""; $creatorName = ""
 
-            if ($IncludeFlowDefinitions) {
+        $flowIndex = 0
+        foreach ($f in $flows) {
+            $flowIndex++
+            if ($flowIndex % 50 -eq 0) {
+                Write-Host "      Flow details: $flowIndex / $($flows.Count)" -ForegroundColor DarkGray
+            }
+
+            # Always fetch full flow detail for definition, triggers, actions, URLs
+            $def = $null
+            $defSummary = $null
+            $creatorId = ""; $creatorName = ""
+            $connRefs = $null
+
+            # Try admin V1 individual GET (returns full definition with parameters)
+            try {
+                $fToken = & $flowTokenRefresh
+                $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken
+                if ($flowDetail) {
+                    $def = $flowDetail.properties.definition
+                    $defSummary = $flowDetail.properties.definitionSummary
+                    $creatorId = $flowDetail.properties.creator.objectId
+                    $creatorName = $flowDetail.properties.creator.displayName
+                    $connRefs = $flowDetail.properties.connectionReferences
+                }
+            }
+            catch {
+                # V1 individual failed — try V2 individual as fallback
                 try {
                     $fToken = & $flowTokenRefresh
                     $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows/$($f.name)?$apiVer" -Token $fToken
                     if ($flowDetail) {
-                        $triggers = $flowDetail.properties.definitionSummary.triggers
-                        $actions = $flowDetail.properties.definitionSummary.actions
+                        $def = $flowDetail.properties.definition
+                        $defSummary = $flowDetail.properties.definitionSummary
                         $creatorId = $flowDetail.properties.creator.objectId
                         $creatorName = $flowDetail.properties.creator.displayName
+                        $connRefs = $flowDetail.properties.connectionReferences
                     }
                 }
                 catch {
-                    # Non-fatal — continue with basic flow info
+                    # Both failed — continue with basic flow info from V2 list
                 }
             }
 
-            $triggerType = if ($triggers -and $triggers.Count -gt 0) { $triggers[0].type } else { "Unknown" }
+            # --- Parse triggers from full definition (has URLs) or fallback to summary ---
+            $triggerType = "Unknown"
+            if ($def -and $def.triggers) {
+                $pos = 0
+                foreach ($prop in $def.triggers.PSObject.Properties) {
+                    $tName = $prop.Name
+                    $t = $prop.Value
+                    $tType = $t.type
+                    $tConnId = ""
+                    $tOpId = ""
+                    $tUrl = ""
+                    if ($t.inputs -and $t.inputs.host) {
+                        $tConnId = if ($t.inputs.host.apiId) { $t.inputs.host.apiId -replace '.*/apis/', '' } else { "" }
+                        $tOpId = $t.inputs.host.operationId
+                    }
+                    $tUrl = Get-ActionEndpointUrl -ActionInputs $t.inputs
+                    if ($pos -eq 0) { $triggerType = $tType }
+
+                    Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
+                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=$tName
+                        TriggerType=$tType; ConnectorId=$tConnId; OperationId=$tOpId; EndpointUrl=$tUrl
+                    })
+                    $pos++; $totalTriggers++
+                }
+            }
+            elseif ($defSummary -and $defSummary.triggers) {
+                $pos = 0
+                foreach ($t in $defSummary.triggers) {
+                    $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
+                    if ($pos -eq 0) { $triggerType = $t.type }
+                    Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
+                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
+                        TriggerType=$t.type; ConnectorId=$tConnId; OperationId=$t.swaggerOperationId; EndpointUrl=""
+                    })
+                    $pos++; $totalTriggers++
+                }
+            }
+
+            # --- Parse actions from full definition (has URLs) or fallback to summary ---
+            if ($def -and $def.actions) {
+                $pos = 0
+                foreach ($prop in $def.actions.PSObject.Properties) {
+                    $aName = $prop.Name
+                    $a = $prop.Value
+                    $aType = $a.type
+                    $aConnId = ""
+                    $aOpId = ""
+                    $aUrl = ""
+                    if ($a.inputs -and $a.inputs.host) {
+                        $aConnId = if ($a.inputs.host.apiId) { $a.inputs.host.apiId -replace '.*/apis/', '' } else { "" }
+                        $aOpId = $a.inputs.host.operationId
+                    }
+                    $aUrl = Get-ActionEndpointUrl -ActionInputs $a.inputs
+                    Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
+                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=$aName
+                        ActionType=$aType; ConnectorId=$aConnId; OperationId=$aOpId; EndpointUrl=$aUrl
+                    })
+                    $pos++; $totalActions++
+                }
+            }
+            elseif ($defSummary -and $defSummary.actions) {
+                $pos = 0
+                foreach ($a in $defSummary.actions) {
+                    $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
+                    Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
+                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
+                        ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=""
+                    })
+                    $pos++; $totalActions++
+                }
+            }
+
+            # --- Connection references for this flow ---
+            if ($connRefs) {
+                foreach ($ref in $connRefs.PSObject.Properties) {
+                    $crConnId = if ($ref.Value.api -and $ref.Value.api.name) { $ref.Value.api.name }
+                                elseif ($ref.Value.id) { $ref.Value.id -replace '.*/apis/', '' }
+                                else { $ref.Name }
+                    $crConnName = if ($ref.Value.connectionName) { $ref.Value.connectionName }
+                                  elseif ($ref.Value.connection -and $ref.Value.connection.name) { $ref.Value.connection.name }
+                                  else { "" }
+                    Append-CsvRow "$OutputPath/FlowConnectionRefs.csv" ([PSCustomObject]@{
+                        FlowId=$f.name; EnvironmentId=$envId; ConnectorId=$crConnId; ConnectionName=$crConnName
+                    })
+                    $totalFlowConnRefs++
+                }
+            }
 
             Append-CsvRow "$OutputPath/Flows.csv" ([PSCustomObject]@{
                 FlowId=$f.name; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
@@ -336,28 +489,6 @@ foreach ($env in $environments) {
                 CollectedAt=$timestamp
             })
             $totalFlows++
-
-            if ($triggers) {
-                $pos = 0
-                foreach ($t in $triggers) {
-                    $trigConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
-                    Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
-                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; TriggerType=$t.type; ConnectorId=$trigConnId
-                    })
-                    $pos++; $totalTriggers++
-                }
-            }
-
-            if ($actions) {
-                $pos = 0
-                foreach ($a in $actions) {
-                    $actConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
-                    Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
-                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; ActionType=$a.type; ConnectorId=$actConnId
-                    })
-                    $pos++; $totalActions++
-                }
-            }
         }
     }
     catch {
@@ -368,7 +499,8 @@ foreach ($env in $environments) {
     # --- CONNECTORS & CONNECTIONS ---
     try {
         $token = Get-PPToken
-        $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis?$apiVer" -Token $token
+        $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis?$apiVer&showApisWithToS=true" -Token $token
+        if (-not $connectors) { $connectors = @() }
         foreach ($c in $connectors) {
             Append-CsvRow "$OutputPath/Connectors.csv" ([PSCustomObject]@{
                 ConnectorId=($c.name -replace '.*/apis/', ''); EnvironmentId=$envId; EnvironmentName=$env.DisplayName
@@ -431,7 +563,7 @@ foreach ($env in $environments) {
 }
 
 Write-Host "  Totals: $totalApps apps, $totalFlows flows, $totalConnectors connectors, $totalConnections connections" -ForegroundColor Gray
-Write-Host "  Totals: $totalAppConnRefs app-connector refs, $totalTriggers triggers, $totalActions actions" -ForegroundColor Gray
+Write-Host "  Totals: $totalAppConnRefs app-connector refs, $totalFlowConnRefs flow-connector refs, $totalTriggers triggers, $totalActions actions" -ForegroundColor Gray
 
 # ============================================================================
 # 5. DLP POLICIES (tenant-level, not per-environment)
@@ -629,6 +761,8 @@ Write-Host "     - Apps.EnvironmentId -> Environments.EnvironmentId" -Foreground
 Write-Host "     - Flows.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
 Write-Host "     - Connections.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
 Write-Host "     - AppConnectorRefs.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
+Write-Host "     - FlowConnectionRefs.FlowId -> Flows.FlowId" -ForegroundColor Gray
+Write-Host "     - FlowConnectionRefs.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
 Write-Host "     - DlpConnectorRules.PolicyId -> DlpPolicies.PolicyId" -ForegroundColor Gray
 Write-Host "     - UsageAnalytics.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
 Write-Host ""

@@ -501,11 +501,12 @@ $tAppConnRefs = [ordered]@{
         (New-ColumnDef "ConnectorId")
         (New-ColumnDef "DisplayName")
         (New-ColumnDef "DataSources")
+        (New-ColumnDef "EndpointUrl")
     )
     partitions = @((New-CsvPartition "AppConnectorRefs" @(
         @{Name="AppId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
         @{Name="ConnectorId"; Type="type text"}, @{Name="DisplayName"; Type="type text"},
-        @{Name="DataSources"; Type="type text"}
+        @{Name="DataSources"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"}
     )))
     measures = @(
         (New-MeasureDef "Total Connector References" "COUNTROWS('AppConnectorRefs')")
@@ -518,13 +519,17 @@ $tFlowActions = [ordered]@{
         (New-ColumnDef "FlowId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentId")
         (New-ColumnDef "Position" "int64" "none")
+        (New-ColumnDef "Name")
         (New-ColumnDef "ActionType")
         (New-ColumnDef "ConnectorId")
+        (New-ColumnDef "OperationId")
+        (New-ColumnDef "EndpointUrl")
     )
     partitions = @((New-CsvPartition "FlowActions" @(
         @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
-        @{Name="Position"; Type="Int64.Type"}, @{Name="ActionType"; Type="type text"},
-        @{Name="ConnectorId"; Type="type text"}
+        @{Name="Position"; Type="Int64.Type"}, @{Name="Name"; Type="type text"},
+        @{Name="ActionType"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
+        @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"}
     )))
     measures = @(
         (New-MeasureDef "Total Flow Actions" "COUNTROWS('FlowActions')")
@@ -537,16 +542,37 @@ $tFlowTriggers = [ordered]@{
         (New-ColumnDef "FlowId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentId")
         (New-ColumnDef "Position" "int64" "none")
+        (New-ColumnDef "Name")
         (New-ColumnDef "TriggerType")
         (New-ColumnDef "ConnectorId")
+        (New-ColumnDef "OperationId")
+        (New-ColumnDef "EndpointUrl")
     )
     partitions = @((New-CsvPartition "FlowTriggers" @(
         @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
-        @{Name="Position"; Type="Int64.Type"}, @{Name="TriggerType"; Type="type text"},
-        @{Name="ConnectorId"; Type="type text"}
+        @{Name="Position"; Type="Int64.Type"}, @{Name="Name"; Type="type text"},
+        @{Name="TriggerType"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
+        @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"}
     )))
     measures = @(
         (New-MeasureDef "Total Flow Triggers" "COUNTROWS('FlowTriggers')")
+    )
+}
+
+$tFlowConnRefs = [ordered]@{
+    name = "FlowConnectionRefs"; lineageTag = (New-Guid)
+    columns = @(
+        (New-ColumnDef "FlowId" "string" "none" $null $false $true)
+        (New-ColumnDef "EnvironmentId")
+        (New-ColumnDef "ConnectorId")
+        (New-ColumnDef "ConnectionName")
+    )
+    partitions = @((New-CsvPartition "FlowConnectionRefs" @(
+        @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
+        @{Name="ConnectorId"; Type="type text"}, @{Name="ConnectionName"; Type="type text"}
+    )))
+    measures = @(
+        (New-MeasureDef "Total Flow Connections" "COUNTROWS('FlowConnectionRefs')")
     )
 }
 
@@ -559,7 +585,7 @@ $modelBim = [ordered]@{
         defaultPowerBIDataSourceVersion = "powerBI_V3"
         sourceQueryCulture = "en-US"
         tables = @($tEnvironments, $tApps, $tFlows, $tConnectors, $tConnections,
-                    $tDlpPolicies, $tDlpRules, $tUsage, $tAppConnRefs, $tFlowActions, $tFlowTriggers)
+                    $tDlpPolicies, $tDlpRules, $tUsage, $tAppConnRefs, $tFlowActions, $tFlowTriggers, $tFlowConnRefs)
         relationships = @(
             (New-RelationshipDef "rel_Apps_Env" "Apps" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_Flows_Env" "Flows" "EnvironmentId" "Environments" "EnvironmentId")
@@ -570,6 +596,7 @@ $modelBim = [ordered]@{
             (New-RelationshipDef "rel_AppConnRefs_App" "AppConnectorRefs" "AppId" "Apps" "AppId")
             (New-RelationshipDef "rel_FlowActions_Flow" "FlowActions" "FlowId" "Flows" "FlowId")
             (New-RelationshipDef "rel_FlowTriggers_Flow" "FlowTriggers" "FlowId" "Flows" "FlowId")
+            (New-RelationshipDef "rel_FlowConnRefs_Flow" "FlowConnectionRefs" "FlowId" "Flows" "FlowId")
         )
         expressions = @(
             [ordered]@{
@@ -579,7 +606,7 @@ $modelBim = [ordered]@{
             }
         )
         annotations = @(
-            @{ name = "PBI_QueryOrder"; value = "[`"Environments`",`"Apps`",`"Flows`",`"Connectors`",`"Connections`",`"DlpPolicies`",`"DlpConnectorRules`",`"UsageAnalytics`",`"AppConnectorRefs`",`"FlowActions`",`"FlowTriggers`"]" }
+            @{ name = "PBI_QueryOrder"; value = "[`"Environments`",`"Apps`",`"Flows`",`"Connectors`",`"Connections`",`"DlpPolicies`",`"DlpConnectorRules`",`"UsageAnalytics`",`"AppConnectorRefs`",`"FlowActions`",`"FlowTriggers`",`"FlowConnectionRefs`"]" }
             @{ name = "__PBI_TimeIntelligenceEnabled"; value = "0" }
         )
     }
@@ -665,6 +692,7 @@ $pageDefs = @{
             (New-DonutVisual "donutFlowState" 20 160 400 300 2000 "Flows" "f" "State" "Total Flows")
             (New-BarChartVisual "barFlowsByEnv" 440 160 400 300 2001 "Flows" "f" "EnvironmentName" "Total Flows")
             (New-TableVisual "tblFlows" 20 480 860 220 3000 "Flows" "f" @("DisplayName","State","CreatorDisplayName","TriggerType","EnvironmentName","LastModifiedTime"))
+            (New-TableVisual "tblFlowActions" 20 720 860 220 3001 "FlowActions" "fa" @("Name","ActionType","ConnectorId","OperationId","EndpointUrl"))
         )
     }
     connectors = @{
