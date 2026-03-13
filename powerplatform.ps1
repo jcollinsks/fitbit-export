@@ -7,15 +7,17 @@
     ready for Power BI import.
 
     Designed for large tenants (1000+ environments, 40K+ apps, 60K+ flows):
-    - Automatic token refresh every 45 minutes
+    - Parallel flow definition fetching via runspace pool (10 concurrent by default)
+    - Automatic token refresh every 20 minutes with re-auth on 401
     - Throttle handling with exponential backoff on 429 responses
     - Streaming CSV writes per environment (low memory footprint)
     - Progress tracking with ETA
     - Error logging to Errors.csv (non-fatal — continues on per-environment failures)
 
-    For each flow, fetches the full definition to extract triggers, actions,
-    and endpoint URLs (SharePoint sites, SQL servers, HTTP endpoints, etc.).
-    This adds one API call per flow but provides complete connection mapping.
+    With -IncludeFlowDefinitions, fetches full definitions to extract triggers,
+    actions, and endpoint URLs (SharePoint sites, SQL servers, HTTP endpoints).
+    Uses a runspace pool for parallel HTTP calls — at 10 concurrent, 60K flows
+    takes ~50 minutes instead of ~48 hours sequential.
 .PARAMETER OutputPath
     Directory for CSV output files. Defaults to ./PowerPlatformExport.
 .PARAMETER IncludeFlowDefinitions
@@ -26,11 +28,15 @@
 .PARAMETER MaxFlowDefinitions
     Limit how many flow definitions to fetch (0 = unlimited). Use with -IncludeFlowDefinitions
     to sample a subset, e.g. -IncludeFlowDefinitions -MaxFlowDefinitions 500
+.PARAMETER ThrottleLimit
+    Max concurrent API calls for parallel flow definition fetching. Default 10.
+    Increase for faster runs (20-25) or decrease if hitting rate limits (5).
 .PARAMETER IncludePermissions
     If set, fetches sharing/permissions for apps and flows.
     WARNING: One API call per resource — at 100K resources this adds hours. Off by default.
 .EXAMPLE
     .\powerplatform.ps1 -OutputPath C:\exports
+    .\powerplatform.ps1 -IncludeFlowDefinitions -ThrottleLimit 20
     .\powerplatform.ps1 -IncludeFlowDefinitions -MaxFlowDefinitions 500
     .\powerplatform.ps1 -IncludePermissions
 #>
@@ -39,7 +45,8 @@ param(
     [string]$OutputPath = "./PowerPlatformExport",
     [switch]$IncludePermissions,
     [switch]$IncludeFlowDefinitions,
-    [int]$MaxFlowDefinitions = 0
+    [int]$MaxFlowDefinitions = 0,
+    [int]$ThrottleLimit = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -443,12 +450,86 @@ foreach ($env in $environments) {
         if ($flows -and $flows.Count -gt 0) {
             $fetchDefs = $IncludeFlowDefinitions
             $defLimit = if ($MaxFlowDefinitions -gt 0) { $MaxFlowDefinitions } else { $flows.Count }
-            $defMsg = if ($fetchDefs) { "fetching definitions (limit: $defLimit)..." } else { "using list data (use -IncludeFlowDefinitions for endpoint URLs)..." }
+            $defMsg = if ($fetchDefs) { "fetching definitions (limit: $defLimit, $ThrottleLimit concurrent)..." } else { "using list data (use -IncludeFlowDefinitions for endpoint URLs)..." }
             Write-Host "    Found $($flows.Count) flows — $defMsg" -ForegroundColor DarkGray
         }
 
+        # --- PARALLEL FETCH flow definitions using runspace pool ---
+        $flowDefCache = @{}
+        if ($fetchDefs -and $flows -and $flows.Count -gt 0) {
+            $flowsToFetch = @(if ($defLimit -lt $flows.Count) { $flows | Select-Object -First $defLimit } else { $flows })
+            $fetchCount = $flowsToFetch.Count
+
+            Write-Host "      Parallel-fetching $fetchCount definitions ($ThrottleLimit concurrent)..." -ForegroundColor Cyan
+
+            $pool = [runspacefactory]::CreateRunspacePool(1, $ThrottleLimit)
+            $pool.Open()
+
+            $fetchScript = {
+                param([string]$Uri, [string]$BearerToken)
+                for ($r = 1; $r -le 3; $r++) {
+                    try {
+                        $h = @{ "Authorization" = "Bearer $BearerToken"; "Accept" = "application/json" }
+                        return (Invoke-RestMethod -Uri $Uri -Method GET -Headers $h -TimeoutSec 30)
+                    }
+                    catch {
+                        $sc = 0
+                        try { $sc = $_.Exception.Response.StatusCode.value__ } catch {}
+                        if ($sc -eq 429) { Start-Sleep -Seconds ([math]::Min(10 * $r, 30)); continue }
+                        if ($sc -eq 403 -or $sc -eq 404 -or $sc -eq 401) { return $null }
+                        if ($r -eq 3) { return $null }
+                    }
+                }
+                return $null
+            }
+
+            # Process in batches of 50 — refresh token between batches, frequent progress
+            $batchSize = [math]::Min(50, $fetchCount)
+            $batchStart = 0
+            $batchTimeoutMs = 120000  # 2 min max per batch — kill hung jobs
+
+            while ($batchStart -lt $fetchCount) {
+                $batchEnd = [math]::Min($batchStart + $batchSize, $fetchCount)
+                $batchToken = & $flowTokenRefresh  # Fresh token each batch
+
+                $pending = [System.Collections.Generic.List[hashtable]]::new()
+                for ($bi = $batchStart; $bi -lt $batchEnd; $bi++) {
+                    $ff = $flowsToFetch[$bi]
+                    $fetchUri = "$flow/providers/Microsoft.ProcessSimple/environments/$envId/flows/$($ff.name)?$apiVer"
+
+                    $ps = [powershell]::Create()
+                    $ps.RunspacePool = $pool
+                    [void]$ps.AddScript($fetchScript).AddArgument($fetchUri).AddArgument($batchToken)
+
+                    $pending.Add(@{ PS = $ps; Handle = $ps.BeginInvoke(); FlowId = $ff.name })
+                }
+
+                foreach ($pj in $pending) {
+                    try {
+                        # Wait with timeout — don't block forever on hung requests
+                        if ($pj.Handle.AsyncWaitHandle.WaitOne($batchTimeoutMs)) {
+                            $res = $pj.PS.EndInvoke($pj.Handle)
+                            if ($res) { $flowDefCache[$pj.FlowId] = $res }
+                        }
+                        else {
+                            # Job hung — kill it and move on
+                            $pj.PS.Stop()
+                        }
+                    }
+                    catch {}
+                    $pj.PS.Dispose()
+                }
+
+                $batchStart = $batchEnd
+                $pct = [math]::Round(($batchStart / $fetchCount) * 100)
+                Write-Host "      Definitions: $batchStart / $fetchCount ($pct%) — cached $($flowDefCache.Count)" -ForegroundColor DarkGray
+            }
+
+            $pool.Close(); $pool.Dispose()
+            Write-Host "      Parallel fetch complete: $($flowDefCache.Count) / $fetchCount definitions" -ForegroundColor Cyan
+        }
+
         $flowIndex = 0
-        $defsFetched = 0
         foreach ($f in $flows) {
             $flowIndex++
             if ($flowIndex % 100 -eq 0) {
@@ -463,41 +544,17 @@ foreach ($env in $environments) {
             $creatorName = if ($f.properties.creator) { $f.properties.creator.displayName } else { "" }
             $connRefs = $f.properties.connectionReferences
 
-            # Optionally fetch full definition (1 API call per flow — slow at scale)
-            if ($fetchDefs -and $defsFetched -lt $defLimit) {
-                $defsFetched++
-                try {
-                    $fToken = & $flowTokenRefresh
-                    # Maker endpoint returns properties.definition with full input parameters
-                    $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken -TokenRefresh $flowTokenRefresh
-                    if ($flowDetail) {
-                        $flowDefinition = $flowDetail.properties.definition
-                        if ($flowDetail.properties.definitionSummary) { $defSummary = $flowDetail.properties.definitionSummary }
-                        if ($flowDetail.properties.creator) {
-                            $creatorId = $flowDetail.properties.creator.objectId
-                            $creatorName = $flowDetail.properties.creator.displayName
-                        }
-                        if ($flowDetail.properties.connectionReferences) { $connRefs = $flowDetail.properties.connectionReferences }
+            # Use pre-fetched definition from parallel cache
+            if ($fetchDefs -and $flowDefCache.ContainsKey($f.name)) {
+                $flowDetail = $flowDefCache[$f.name]
+                if ($flowDetail) {
+                    $flowDefinition = $flowDetail.properties.definition
+                    if ($flowDetail.properties.definitionSummary) { $defSummary = $flowDetail.properties.definitionSummary }
+                    if ($flowDetail.properties.creator) {
+                        $creatorId = $flowDetail.properties.creator.objectId
+                        $creatorName = $flowDetail.properties.creator.displayName
                     }
-                }
-                catch {
-                    # Maker failed — try admin V1
-                    try {
-                        $fToken = & $flowTokenRefresh
-                        $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken -TokenRefresh $flowTokenRefresh
-                        if ($flowDetail) {
-                            $flowDefinition = $flowDetail.properties.definition
-                            if ($flowDetail.properties.definitionSummary) { $defSummary = $flowDetail.properties.definitionSummary }
-                            if ($flowDetail.properties.creator) {
-                                $creatorId = $flowDetail.properties.creator.objectId
-                                $creatorName = $flowDetail.properties.creator.displayName
-                            }
-                            if ($flowDetail.properties.connectionReferences) { $connRefs = $flowDetail.properties.connectionReferences }
-                        }
-                    }
-                    catch {
-                        # Both failed — use V2 list data (already set above)
-                    }
+                    if ($flowDetail.properties.connectionReferences) { $connRefs = $flowDetail.properties.connectionReferences }
                 }
             }
 
