@@ -312,7 +312,7 @@ $tEnvironments = [ordered]@{
 $tApps = [ordered]@{
     name = "Apps"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "AppId" "string" "none" -IsKey $true)
+        (New-ColumnDef "AppId")
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
         (New-ColumnDef "DisplayName")
@@ -362,7 +362,7 @@ $tApps = [ordered]@{
 $tFlows = [ordered]@{
     name = "Flows"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "FlowId" "string" "none" -IsKey $true)
+        (New-ColumnDef "FlowId")
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
         (New-ColumnDef "DisplayName")
@@ -402,7 +402,7 @@ $tFlows = [ordered]@{
 $tConnectors = [ordered]@{
     name = "Connectors"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "ConnectorId" "string" "none" -IsKey $true)
+        (New-ColumnDef "ConnectorId")
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
         (New-ColumnDef "DisplayName")
@@ -430,7 +430,7 @@ $tConnectors = [ordered]@{
 $tConnections = [ordered]@{
     name = "Connections"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "ConnectionId" "string" "none" -IsKey $true)
+        (New-ColumnDef "ConnectionId")
         (New-ColumnDef "ConnectorId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
@@ -633,10 +633,6 @@ $modelBim = [ordered]@{
             (New-RelationshipDef "rel_Connections_Env" "Connections" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_DlpRules_Policy" "DlpConnectorRules" "PolicyId" "DlpPolicies" "PolicyId")
             (New-RelationshipDef "rel_Usage_Env" "UsageAnalytics" "EnvironmentId" "Environments" "EnvironmentId")
-            (New-RelationshipDef "rel_AppConnRefs_App" "AppConnectorRefs" "AppId" "Apps" "AppId")
-            (New-RelationshipDef "rel_FlowActions_Flow" "FlowActions" "FlowId" "Flows" "FlowId")
-            (New-RelationshipDef "rel_FlowTriggers_Flow" "FlowTriggers" "FlowId" "Flows" "FlowId")
-            (New-RelationshipDef "rel_FlowConnRefs_Flow" "FlowConnectionRefs" "FlowId" "Flows" "FlowId")
         )
         expressions = @(
             [ordered]@{
