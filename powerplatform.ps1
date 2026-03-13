@@ -206,7 +206,7 @@ Initialize-Csv "$OutputPath/Flows.csv" @("FlowId","EnvironmentId","EnvironmentNa
 Initialize-Csv "$OutputPath/FlowTriggers.csv" @("FlowId","EnvironmentId","Position","TriggerType","ConnectorId")
 Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowId","EnvironmentId","Position","ActionType","ConnectorId")
 Initialize-Csv "$OutputPath/Connectors.csv" @("ConnectorId","EnvironmentId","EnvironmentName","DisplayName","Description","Publisher","Tier","IsCustom","IconUri","CollectedAt")
-Initialize-Csv "$OutputPath/Connections.csv" @("ConnectionId","ConnectorId","EnvironmentId","EnvironmentName","DisplayName","CreatedByObjectId","CreatedByName","CreatedByEmail","CreatedTime","Status","IsShared","CollectedAt")
+Initialize-Csv "$OutputPath/Connections.csv" @("ConnectionId","ConnectorId","EnvironmentId","EnvironmentName","DisplayName","ConnectionUrl","CreatedByObjectId","CreatedByName","CreatedByEmail","CreatedTime","Status","IsShared","CollectedAt")
 
 $totalApps = 0; $totalFlows = 0; $totalConnectors = 0; $totalConnections = 0
 $totalAppConnRefs = 0; $totalTriggers = 0; $totalActions = 0
@@ -267,9 +267,11 @@ foreach ($env in $environments) {
     }
 
     # --- FLOWS ---
+    # NOTE: Must use V1 endpoint (not v2/flows). V2 returns AdminFlowWithoutDefinition
+    # which strips definitionSummary, creator, and connectionReferences.
     try {
         $token = Get-PPToken
-        $flows = Invoke-PPApiPaged -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows?$apiVer" -Token $token
+        $flows = Invoke-PPApiPaged -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows?$apiVer" -Token $token
         foreach ($f in $flows) {
             $triggers = $f.properties.definitionSummary.triggers
             $triggerType = if ($triggers -and $triggers.Count -gt 0) { $triggers[0].type } else { "Unknown" }
@@ -288,8 +290,10 @@ foreach ($env in $environments) {
 
             $pos = 0
             foreach ($t in $triggers) {
+                # Triggers have type/kind but NOT swaggerOperationId — use api.id for connector
+                $trigConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
                 Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
-                    FlowId=$f.name; EnvironmentId=$envId; Position=$pos; TriggerType=$t.type; ConnectorId=$t.swaggerOperationId
+                    FlowId=$f.name; EnvironmentId=$envId; Position=$pos; TriggerType=$t.type; ConnectorId=$trigConnId
                 })
                 $pos++; $totalTriggers++
             }
@@ -297,8 +301,9 @@ foreach ($env in $environments) {
             $actions = $f.properties.definitionSummary.actions
             $pos = 0
             foreach ($a in $actions) {
+                $actConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
                 Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
-                    FlowId=$f.name; EnvironmentId=$envId; Position=$pos; ActionType=$a.type; ConnectorId=$a.swaggerOperationId
+                    FlowId=$f.name; EnvironmentId=$envId; Position=$pos; ActionType=$a.type; ConnectorId=$actConnId
                 })
                 $pos++; $totalActions++
             }
@@ -312,7 +317,16 @@ foreach ($env in $environments) {
     # --- CONNECTORS & CONNECTIONS ---
     try {
         $token = Get-PPToken
-        $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis?$apiVer" -Token $token
+        # Try admin endpoint first, then non-admin as fallback. Include showApisWithToS to get full list.
+        $connectors = $null
+        try {
+            $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis?$apiVer&showApisWithToS=true" -Token $token
+        }
+        catch {
+            # Fallback to non-admin endpoint
+            $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/apis?$apiVer&`$filter=environment eq '$envId'&showApisWithToS=true" -Token $token
+        }
+        if ($null -eq $connectors) { $connectors = @() }
         foreach ($c in $connectors) {
             Append-CsvRow "$OutputPath/Connectors.csv" ([PSCustomObject]@{
                 ConnectorId=($c.name -replace '.*/apis/', ''); EnvironmentId=$envId; EnvironmentName=$env.DisplayName
@@ -328,9 +342,40 @@ foreach ($env in $environments) {
         foreach ($c in $connections) {
             $connId = $c.properties.apiId -replace '.*/apis/', ''
             $status = if ($c.properties.statuses -and $c.properties.statuses.Count -gt 0) { $c.properties.statuses[0].status } else { "Unknown" }
+
+            # Extract connection URL from connectionParameters or connectionParametersSet
+            $connUrl = ""
+            $cp = $c.properties.connectionParameters
+            if ($cp) {
+                # SQL: server + database
+                if ($cp.server) { $connUrl = $cp.server }
+                if ($cp.database) { $connUrl = if ($connUrl) { "$connUrl/$($cp.database)" } else { $cp.database } }
+                # Workflow/Logic Apps: endpoint URL
+                if (-not $connUrl -and $cp.workflowEndpoint) { $connUrl = $cp.workflowEndpoint }
+                # SharePoint: siteUrl or token:siteUrl
+                if (-not $connUrl -and $cp.siteUrl) { $connUrl = $cp.siteUrl }
+                if (-not $connUrl -and $cp.'token:siteUrl') { $connUrl = $cp.'token:siteUrl' }
+                # Generic: gateway, url, serviceUrl, endpoint
+                if (-not $connUrl -and $cp.gateway) { $connUrl = $cp.gateway }
+                if (-not $connUrl -and $cp.url) { $connUrl = $cp.url }
+                if (-not $connUrl -and $cp.serviceUrl) { $connUrl = $cp.serviceUrl }
+                if (-not $connUrl -and $cp.endpoint) { $connUrl = $cp.endpoint }
+                if (-not $connUrl -and $cp.baseUrl) { $connUrl = $cp.baseUrl }
+            }
+            # Fallback: check connectionParametersSet for complex auth scenarios
+            if (-not $connUrl -and $c.properties.connectionParametersSet) {
+                $vals = $c.properties.connectionParametersSet.values
+                if ($vals) {
+                    if ($vals.server.value) { $connUrl = $vals.server.value }
+                    elseif ($vals.siteUrl.value) { $connUrl = $vals.siteUrl.value }
+                    elseif ($vals.url.value) { $connUrl = $vals.url.value }
+                }
+            }
+
             Append-CsvRow "$OutputPath/Connections.csv" ([PSCustomObject]@{
                 ConnectionId=$c.name; ConnectorId=$connId; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
-                DisplayName=$c.properties.displayName; CreatedByObjectId=$c.properties.createdBy.id
+                DisplayName=$c.properties.displayName; ConnectionUrl=$connUrl
+                CreatedByObjectId=$c.properties.createdBy.id
                 CreatedByName=$c.properties.createdBy.displayName; CreatedByEmail=$c.properties.createdBy.email
                 CreatedTime=$c.properties.createdTime; Status=$status; IsShared=$c.properties.allowSharing; CollectedAt=$timestamp
             })
@@ -399,23 +444,52 @@ Write-Host "  Found $($allDlpPolicies.Count) policies, $($allDlpConnectorRules.C
 # ============================================================================
 
 Write-Host "[6/7] Collecting usage analytics..." -ForegroundColor Yellow
-try {
-    $adminToken = Get-AdminToken
-    $usageUri = "$bap/providers/Microsoft.BusinessAppPlatform/scopes/admin/analytics/usage?$apiVer"
-    $usage = Invoke-PPApiPaged -Uri $usageUri -Token $adminToken
-
-    $allUsage = $usage | ForEach-Object {
-        [PSCustomObject]@{
-            ResourceType=$_.resourceType; EnvironmentId=$_.environmentId; Date=$_.date
-            UniqueUsers=$_.uniqueUsers; TotalSessions=$_.totalSessions; TotalActions=$_.totalActions; CollectedAt=$timestamp
+$usageCollected = $false
+# Try BAP analytics endpoint with both token types
+foreach ($tokenName in @("PP", "Admin")) {
+    if ($usageCollected) { break }
+    try {
+        $uToken = if ($tokenName -eq "PP") { Get-PPToken } else { Get-AdminToken }
+        $usageUri = "$bap/providers/Microsoft.BusinessAppPlatform/scopes/admin/analytics/usage?$apiVer"
+        $usage = Invoke-PPApiPaged -Uri $usageUri -Token $uToken
+        if ($usage -and $usage.Count -gt 0) {
+            $allUsage = $usage | ForEach-Object {
+                [PSCustomObject]@{
+                    ResourceType=$_.resourceType; EnvironmentId=$_.environmentId; Date=$_.date
+                    UniqueUsers=$_.uniqueUsers; TotalSessions=$_.totalSessions; TotalActions=$_.totalActions; CollectedAt=$timestamp
+                }
+            }
+            $allUsage | Export-Csv "$OutputPath/UsageAnalytics.csv" -NoTypeInformation
+            Write-Host "  Found $($allUsage.Count) usage records (via $tokenName token)" -ForegroundColor Gray
+            $usageCollected = $true
         }
     }
-    $allUsage | Export-Csv "$OutputPath/UsageAnalytics.csv" -NoTypeInformation
-    Write-Host "  Found $($allUsage.Count) usage records" -ForegroundColor Gray
+    catch {
+        Write-Host "  Note: Usage analytics with $tokenName token failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
 }
-catch {
-    Write-Host "  Warning: Usage analytics not available: $($_.Exception.Message)" -ForegroundColor DarkYellow
-    @() | Export-Csv "$OutputPath/UsageAnalytics.csv" -NoTypeInformation
+if (-not $usageCollected) {
+    # Fallback: build basic usage summary from already-collected data
+    Write-Host "  Usage analytics API unavailable — building summary from collected data" -ForegroundColor DarkYellow
+    $usageSummary = @()
+    foreach ($env in $environments) {
+        $envApps = (Import-Csv "$OutputPath/Apps.csv" | Where-Object { $_.EnvironmentId -eq $env.EnvironmentId }).Count
+        $envFlows = (Import-Csv "$OutputPath/Flows.csv" | Where-Object { $_.EnvironmentId -eq $env.EnvironmentId }).Count
+        if ($envApps -gt 0) {
+            $usageSummary += [PSCustomObject]@{
+                ResourceType="PowerApp"; EnvironmentId=$env.EnvironmentId; Date=$timestamp
+                UniqueUsers=0; TotalSessions=0; TotalActions=$envApps; CollectedAt=$timestamp
+            }
+        }
+        if ($envFlows -gt 0) {
+            $usageSummary += [PSCustomObject]@{
+                ResourceType="Flow"; EnvironmentId=$env.EnvironmentId; Date=$timestamp
+                UniqueUsers=0; TotalSessions=0; TotalActions=$envFlows; CollectedAt=$timestamp
+            }
+        }
+    }
+    $usageSummary | Export-Csv "$OutputPath/UsageAnalytics.csv" -NoTypeInformation
+    Write-Host "  Built $($usageSummary.Count) summary records from inventory data" -ForegroundColor Gray
 }
 
 # ============================================================================

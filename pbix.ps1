@@ -397,6 +397,7 @@ $tConnections = [ordered]@{
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
         (New-ColumnDef "DisplayName")
+        (New-ColumnDef "ConnectionUrl")
         (New-ColumnDef "CreatedByObjectId")
         (New-ColumnDef "CreatedByName")
         (New-ColumnDef "CreatedByEmail")
@@ -408,7 +409,8 @@ $tConnections = [ordered]@{
     partitions = @((New-CsvPartition "Connections" @(
         @{Name="ConnectionId"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
         @{Name="EnvironmentId"; Type="type text"}, @{Name="EnvironmentName"; Type="type text"},
-        @{Name="DisplayName"; Type="type text"}, @{Name="CreatedByObjectId"; Type="type text"},
+        @{Name="DisplayName"; Type="type text"}, @{Name="ConnectionUrl"; Type="type text"},
+        @{Name="CreatedByObjectId"; Type="type text"},
         @{Name="CreatedByName"; Type="type text"}, @{Name="CreatedByEmail"; Type="type text"},
         @{Name="CreatedTime"; Type="type datetime"}, @{Name="Status"; Type="type text"},
         @{Name="IsShared"; Type="type logical"}, @{Name="CollectedAt"; Type="type datetime"}
@@ -676,6 +678,7 @@ $pageDefs = @{
             (New-DonutVisual "donutConnTier" 20 160 400 300 2000 "Connectors" "c" "Tier" "Total Connectors")
             (New-DonutVisual "donutConnStatus" 440 160 400 300 2001 "Connections" "cx" "Status" "Total Connections")
             (New-TableVisual "tblConnectors" 20 480 860 220 3000 "Connectors" "c" @("DisplayName","Tier","Publisher","IsCustom","EnvironmentName"))
+            (New-TableVisual "tblConnUrls" 20 720 860 220 3001 "Connections" "cx" @("DisplayName","ConnectionUrl","Status","CreatedByName","EnvironmentName"))
         )
     }
     dlp = @{
