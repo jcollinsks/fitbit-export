@@ -353,8 +353,8 @@ $tApps = [ordered]@{
     )))
     measures = @(
         (New-MeasureDef "Total Apps" "COUNTROWS('Apps')")
-        (New-MeasureDef "Canvas Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[AppType] = `"CanvasApp`")")
-        (New-MeasureDef "Model-Driven Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[AppType] = `"ModelDrivenApp`")")
+        (New-MeasureDef "Canvas Apps" "CALCULATE(COUNTROWS('Apps'), CONTAINSSTRING('Apps'[AppType], `"Canvas`"))")
+        (New-MeasureDef "Model-Driven Apps" "CALCULATE(COUNTROWS('Apps'), CONTAINSSTRING('Apps'[AppType], `"Model`"))")
         (New-MeasureDef "Premium API Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[UsesPremiumApi] = TRUE())")
         (New-MeasureDef "Solution-Aware Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[IsSolutionAware] = TRUE())")
         (New-MeasureDef "Total Shared Users" "SUM('Apps'[SharedUsersCount])")

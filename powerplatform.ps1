@@ -324,10 +324,14 @@ foreach ($env in $environments) {
         $token = Get-PPToken
         $apps = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apps?$apiVer" -Token $token
         foreach ($app in $apps) {
+            # appType is at ROOT level in the API response, not under properties
+            $appType = if ($app.appType) { $app.appType }
+                       elseif ($app.properties.appType) { $app.properties.appType }
+                       else { "CanvasApp" }
             $row = [PSCustomObject]@{
                 AppId=$app.name; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
                 DisplayName=$app.properties.displayName; Description=$app.properties.description
-                AppType=$app.properties.appType; OwnerObjectId=$app.properties.owner.id
+                AppType=$appType; OwnerObjectId=$app.properties.owner.id
                 OwnerDisplayName=$app.properties.owner.displayName; OwnerEmail=$app.properties.owner.email
                 CreatedTime=$app.properties.createdTime; LastModifiedTime=$app.properties.lastModifiedTime
                 LastPublishedTime=$app.properties.lastPublishedDate; AppVersion=$app.properties.appVersion
