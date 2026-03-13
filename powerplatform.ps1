@@ -294,13 +294,14 @@ foreach ($env in $environments) {
 
             # Build lookups for cross-referencing with apps and flows
             if ($connUrl) {
-                $envConnByName[$c.name] = $connUrl
+                $connUrlStr = [string]$connUrl
+                $envConnByName[$c.name] = $connUrlStr
                 # Group all URLs by connector type (e.g. shared_sharepointonline → all SP site URLs)
                 if (-not $envConnByType.ContainsKey($connId)) {
                     $envConnByType[$connId] = [System.Collections.Generic.List[string]]::new()
                 }
-                if (-not $envConnByType[$connId].Contains($connUrl)) {
-                    $envConnByType[$connId].Add($connUrl)
+                if ($envConnByType[$connId] -notcontains $connUrlStr) {
+                    $envConnByType[$connId].Add($connUrlStr)
                 }
             }
 
