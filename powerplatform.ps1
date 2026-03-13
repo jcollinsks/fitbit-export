@@ -267,20 +267,32 @@ foreach ($env in $environments) {
     }
 
     # --- FLOWS ---
-    # NOTE: Must use V1 endpoint (not v2/flows). V2 returns AdminFlowWithoutDefinition
-    # which strips definitionSummary, creator, and connectionReferences.
+    # Use V2 list (works with standard admin perms) then per-flow GET for definition details
     try {
         $token = Get-PPToken
-        $flows = Invoke-PPApiPaged -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows?$apiVer" -Token $token
+        $flows = Invoke-PPApiPaged -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows?$apiVer" -Token $token
         foreach ($f in $flows) {
-            $triggers = $f.properties.definitionSummary.triggers
+            # V2 list has basic info only — fetch full flow details for definitionSummary
+            $flowDetail = $null
+            try {
+                $token = Get-PPToken
+                $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows/$($f.name)?$apiVer" -Token $token
+            }
+            catch {
+                # Non-fatal: we still have basic flow info from V2 list
+            }
+
+            $triggers = $flowDetail.properties.definitionSummary.triggers
             $triggerType = if ($triggers -and $triggers.Count -gt 0) { $triggers[0].type } else { "Unknown" }
+            # Creator comes from the detail response
+            $creatorId = if ($flowDetail) { $flowDetail.properties.creator.objectId } else { "" }
+            $creatorName = if ($flowDetail) { $flowDetail.properties.creator.displayName } else { "" }
 
             Append-CsvRow "$OutputPath/Flows.csv" ([PSCustomObject]@{
                 FlowId=$f.name; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
                 DisplayName=$f.properties.displayName; Description=$f.properties.description
-                State=$f.properties.state; CreatorObjectId=$f.properties.creator.objectId
-                CreatorDisplayName=$f.properties.creator.displayName; CreatedTime=$f.properties.createdTime
+                State=$f.properties.state; CreatorObjectId=$creatorId
+                CreatorDisplayName=$creatorName; CreatedTime=$f.properties.createdTime
                 LastModifiedTime=$f.properties.lastModifiedTime; TriggerType=$triggerType
                 IsSolutionAware=$f.properties.isSolutionAware; SolutionId=$f.properties.solutionId
                 IsManaged=$f.properties.isManaged; SuspensionReason=$f.properties.flowSuspensionReason
@@ -288,24 +300,25 @@ foreach ($env in $environments) {
             })
             $totalFlows++
 
-            $pos = 0
-            foreach ($t in $triggers) {
-                # Triggers have type/kind but NOT swaggerOperationId — use api.id for connector
-                $trigConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
-                Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
-                    FlowId=$f.name; EnvironmentId=$envId; Position=$pos; TriggerType=$t.type; ConnectorId=$trigConnId
-                })
-                $pos++; $totalTriggers++
-            }
+            if ($flowDetail) {
+                $pos = 0
+                foreach ($t in $triggers) {
+                    $trigConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
+                    Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
+                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; TriggerType=$t.type; ConnectorId=$trigConnId
+                    })
+                    $pos++; $totalTriggers++
+                }
 
-            $actions = $f.properties.definitionSummary.actions
-            $pos = 0
-            foreach ($a in $actions) {
-                $actConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
-                Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
-                    FlowId=$f.name; EnvironmentId=$envId; Position=$pos; ActionType=$a.type; ConnectorId=$actConnId
-                })
-                $pos++; $totalActions++
+                $actions = $flowDetail.properties.definitionSummary.actions
+                $pos = 0
+                foreach ($a in $actions) {
+                    $actConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
+                    Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
+                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; ActionType=$a.type; ConnectorId=$actConnId
+                    })
+                    $pos++; $totalActions++
+                }
             }
         }
     }
