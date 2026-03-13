@@ -422,8 +422,8 @@ foreach ($env in $environments) {
                 }
             }
 
-            # Build connector → URL lookup from this flow's connectionReferences + connection data
-            $flowConnUrls = @{}  # connectorId → URL
+            # Build connector → ALL URLs lookup from this flow's connectionReferences + connection data
+            $flowConnUrls = @{}  # connectorId → list of unique URLs
             if ($connRefs) {
                 foreach ($ref in $connRefs.PSObject.Properties) {
                     $crConnId = if ($ref.Value.api -and $ref.Value.api.name) { $ref.Value.api.name }
@@ -437,8 +437,15 @@ foreach ($env in $environments) {
                     if ($crConnName -and $envConnLookup.ContainsKey($crConnName)) {
                         $crUrl = $envConnLookup[$crConnName]
                     }
-                    # Also store by connector ID for action/trigger lookups
-                    if ($crUrl) { $flowConnUrls[$crConnId] = $crUrl }
+                    # Collect ALL URLs per connector (a flow can have multiple connections to same connector)
+                    if ($crUrl) {
+                        if (-not $flowConnUrls.ContainsKey($crConnId)) {
+                            $flowConnUrls[$crConnId] = [System.Collections.Generic.List[string]]::new()
+                        }
+                        if (-not $flowConnUrls[$crConnId].Contains($crUrl)) {
+                            $flowConnUrls[$crConnId].Add($crUrl)
+                        }
+                    }
 
                     Append-CsvRow "$OutputPath/FlowConnectionRefs.csv" ([PSCustomObject]@{
                         FlowId=$f.name; EnvironmentId=$envId; ConnectorId=$crConnId; ConnectionName=$crConnName; ConnectionUrl=$crUrl
@@ -453,7 +460,7 @@ foreach ($env in $environments) {
                 $pos = 0
                 foreach ($t in $defSummary.triggers) {
                     $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
-                    $tUrl = if ($tConnId -and $flowConnUrls.ContainsKey($tConnId)) { $flowConnUrls[$tConnId] } else { "" }
+                    $tUrl = if ($tConnId -and $flowConnUrls.ContainsKey($tConnId)) { $flowConnUrls[$tConnId] -join "; " } else { "" }
                     if ($pos -eq 0) { $triggerType = $t.type }
                     Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
                         FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
@@ -468,7 +475,7 @@ foreach ($env in $environments) {
                 $pos = 0
                 foreach ($a in $defSummary.actions) {
                     $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
-                    $aUrl = if ($aConnId -and $flowConnUrls.ContainsKey($aConnId)) { $flowConnUrls[$aConnId] } else { "" }
+                    $aUrl = if ($aConnId -and $flowConnUrls.ContainsKey($aConnId)) { $flowConnUrls[$aConnId] -join "; " } else { "" }
                     Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
                         FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
                         ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=$aUrl
