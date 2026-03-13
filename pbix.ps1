@@ -97,93 +97,116 @@ function New-RelationshipDef {
 }
 
 # Visual builder helpers
-function New-SourceRef { param([string]$Alias) @{ SourceRef = @{ Source = $Alias } } }
+function New-SourceRef { param([string]$Entity) @{ SourceRef = @{ Entity = $Entity } } }
 
 function New-ColField {
-    param([string]$Alias, [string]$Property)
-    @{ Column = @{ Expression = (New-SourceRef $Alias); Property = $Property } }
+    param([string]$Entity, [string]$Property)
+    @{ Column = @{ Expression = (New-SourceRef $Entity); Property = $Property } }
 }
 
 function New-MeasureField {
-    param([string]$Alias, [string]$Property)
-    @{ Measure = @{ Expression = (New-SourceRef $Alias); Property = $Property } }
+    param([string]$Entity, [string]$Property)
+    @{ Measure = @{ Expression = (New-SourceRef $Entity); Property = $Property } }
 }
 
 function New-Projection {
-    param([string]$Table, [string]$Alias, [string]$Property, [string]$Type = "Column")
-    $field = if ($Type -eq "Measure") { New-MeasureField $Alias $Property } else { New-ColField $Alias $Property }
-    @{ field = $field; queryRef = "$Table.$Property"; nativeQueryRef = $Property }
+    param([string]$Table, [string]$Property, [string]$Type = "Column")
+    $field = if ($Type -eq "Measure") { New-MeasureField $Table $Property } else { New-ColField $Table $Property }
+    @{ field = $field; queryRef = "$Table.$Property" }
 }
 
 function New-CardVisual {
     param([string]$Name, [int]$X, [int]$Y, [int]$W, [int]$H, [int]$Z,
-          [string]$Table, [string]$Alias, [string]$Measure)
-    [ordered]@{
-        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.7.0/schema.json"
+          [string]$Table, [string]$Measure, [string]$Title = $null)
+    $vis = [ordered]@{
+        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json"
         name = $Name
         position = [ordered]@{ x = $X; y = $Y; z = $Z; width = $W; height = $H; tabOrder = $Z }
         visual = [ordered]@{
             visualType = "card"
             query = [ordered]@{
                 queryState = [ordered]@{
-                    Values = @{ projections = @(,(New-Projection $Table $Alias $Measure "Measure")) }
+                    Values = @{ projections = @(,(New-Projection $Table $Measure "Measure")) }
                 }
             }
             objects = @{
-                labels = @(@{ properties = @{ fontSize = @{ expr = @{ Literal = @{ Value = "28D" } } } } })
-                categoryLabels = @(@{ properties = @{ show = @{ expr = @{ Literal = @{ Value = "true" } } } } })
+                categoryLabels = @(@{ properties = @{ show = @{ expr = @{ Literal = @{ Value = "false" } } } } })
             }
-            drillFilterOtherVisuals = $true
         }
     }
+    if ($Title) {
+        $vis.visual.visualContainerObjects = @{
+            title = @(@{ properties = @{
+                show = @{ expr = @{ Literal = @{ Value = "true" } } }
+                text = @{ expr = @{ Literal = @{ Value = "'$Title'" } } }
+            } })
+        }
+    }
+    $vis
 }
 
 function New-BarChartVisual {
     param([string]$Name, [int]$X, [int]$Y, [int]$W, [int]$H, [int]$Z,
-          [string]$Table, [string]$Alias, [string]$CategoryCol, [string]$ValueMeasure)
-    [ordered]@{
-        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.7.0/schema.json"
+          [string]$Table, [string]$CategoryCol, [string]$ValueMeasure, [string]$Title = $null)
+    $vis = [ordered]@{
+        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json"
         name = $Name
         position = [ordered]@{ x = $X; y = $Y; z = $Z; width = $W; height = $H; tabOrder = $Z }
         visual = [ordered]@{
             visualType = "clusteredBarChart"
             query = [ordered]@{
                 queryState = [ordered]@{
-                    Category = @{ projections = @(,(New-Projection $Table $Alias $CategoryCol "Column")) }
-                    Y = @{ projections = @(,(New-Projection $Table $Alias $ValueMeasure "Measure")) }
+                    Category = @{ projections = @(,(New-Projection $Table $CategoryCol "Column")) }
+                    Y = @{ projections = @(,(New-Projection $Table $ValueMeasure "Measure")) }
                 }
             }
-            drillFilterOtherVisuals = $true
         }
     }
+    if ($Title) {
+        $vis.visual.visualContainerObjects = @{
+            title = @(@{ properties = @{
+                show = @{ expr = @{ Literal = @{ Value = "true" } } }
+                text = @{ expr = @{ Literal = @{ Value = "'$Title'" } } }
+            } })
+        }
+    }
+    $vis
 }
 
 function New-DonutVisual {
     param([string]$Name, [int]$X, [int]$Y, [int]$W, [int]$H, [int]$Z,
-          [string]$Table, [string]$Alias, [string]$CategoryCol, [string]$ValueMeasure)
-    [ordered]@{
-        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.7.0/schema.json"
+          [string]$Table, [string]$CategoryCol, [string]$ValueMeasure, [string]$Title = $null)
+    $vis = [ordered]@{
+        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json"
         name = $Name
         position = [ordered]@{ x = $X; y = $Y; z = $Z; width = $W; height = $H; tabOrder = $Z }
         visual = [ordered]@{
             visualType = "donutChart"
             query = [ordered]@{
                 queryState = [ordered]@{
-                    Category = @{ projections = @(,(New-Projection $Table $Alias $CategoryCol "Column")) }
-                    Y = @{ projections = @(,(New-Projection $Table $Alias $ValueMeasure "Measure")) }
+                    Category = @{ projections = @(,(New-Projection $Table $CategoryCol "Column")) }
+                    Y = @{ projections = @(,(New-Projection $Table $ValueMeasure "Measure")) }
                 }
             }
-            drillFilterOtherVisuals = $true
         }
     }
+    if ($Title) {
+        $vis.visual.visualContainerObjects = @{
+            title = @(@{ properties = @{
+                show = @{ expr = @{ Literal = @{ Value = "true" } } }
+                text = @{ expr = @{ Literal = @{ Value = "'$Title'" } } }
+            } })
+        }
+    }
+    $vis
 }
 
 function New-TableVisual {
     param([string]$Name, [int]$X, [int]$Y, [int]$W, [int]$H, [int]$Z,
-          [string]$Table, [string]$Alias, [string[]]$Columns)
-    $projections = $Columns | ForEach-Object { New-Projection $Table $Alias $_ "Column" }
-    [ordered]@{
-        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.7.0/schema.json"
+          [string]$Table, [string[]]$Columns, [string]$Title = $null)
+    $projections = $Columns | ForEach-Object { New-Projection $Table $_ "Column" }
+    $vis = [ordered]@{
+        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json"
         name = $Name
         position = [ordered]@{ x = $X; y = $Y; z = $Z; width = $W; height = $H; tabOrder = $Z }
         visual = [ordered]@{
@@ -193,9 +216,17 @@ function New-TableVisual {
                     Values = @{ projections = @($projections) }
                 }
             }
-            drillFilterOtherVisuals = $true
         }
     }
+    if ($Title) {
+        $vis.visual.visualContainerObjects = @{
+            title = @(@{ properties = @{
+                show = @{ expr = @{ Literal = @{ Value = "true" } } }
+                text = @{ expr = @{ Literal = @{ Value = "'$Title'" } } }
+            } })
+        }
+    }
+    $vis
 }
 
 # ============================================================================
@@ -638,17 +669,38 @@ Write-JsonFile "$reportDir/definition.pbir" ([ordered]@{
 $defDir = "$reportDir/definition"
 Write-JsonFile "$defDir/version.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/versionMetadata/1.0.0/schema.json"
-    version = "4.0.0"
+    version = "2.0.0"
 })
 Write-JsonFile "$defDir/report.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/report/1.0.0/schema.json"
     layoutOptimization = "None"
-    themeCollection = @{ baseTheme = @{ name = "CY24SU06"; reportVersionAtImport = "5.55"; type = "SharedResources" } }
-    settings = @{ useStylableVisualContainerHeader = $true; exportDataMode = "AllowSummarizedAndUnderlying" }
+    themeCollection = @{
+        baseTheme = [ordered]@{
+            name = "CY24SU10"
+            reportVersionAtImport = [ordered]@{ visual = "1.8.90"; report = "2.0.90"; page = "1.3.90" }
+            type = "SharedResources"
+        }
+    }
+    resourcePackages = @(@{
+        name = "SharedResources"; type = "SharedResources"
+        items = @(@{ name = "CY24SU10"; path = "BaseThemes/CY24SU10.json"; type = "BaseTheme" })
+    })
+    settings = [ordered]@{
+        useStylableVisualContainerHeader = $true
+        defaultDrillFilterOtherVisuals = $true
+        useEnhancedTooltips = $false
+    }
+    slowDataSourceSettings = [ordered]@{
+        isCrossHighlightingDisabled = $false
+        isSlicerSelectionsButtonEnabled = $false
+        isFilterSelectionsButtonEnabled = $false
+        isFieldWellButtonEnabled = $false
+        isApplyAllButtonEnabled = $false
+    }
 })
 
 $pageNames = @("environments", "apps", "flows", "connectors", "dlp", "usage")
-Write-JsonFile "$defDir/pages.json" ([ordered]@{
+Write-JsonFile "$defDir/pages/pages.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.0.0/schema.json"
     pageOrder = $pageNames
     activePageName = "environments"
@@ -660,78 +712,78 @@ $pageDefs = @{
     environments = @{
         displayName = "Environments"
         visuals = @(
-            (New-CardVisual "cardTotalEnv" 20 20 200 120 1000 "Environments" "e" "Total Environments")
-            (New-CardVisual "cardProdEnv" 240 20 200 120 1001 "Environments" "e" "Production Environments")
-            (New-CardVisual "cardSandboxEnv" 460 20 200 120 1002 "Environments" "e" "Sandbox Environments")
-            (New-CardVisual "cardDataverse" 680 20 200 120 1003 "Environments" "e" "Dataverse Enabled")
-            (New-CardVisual "cardCapacity" 900 20 200 120 1004 "Environments" "e" "Total Capacity GB")
-            (New-DonutVisual "donutEnvType" 20 160 400 300 2000 "Environments" "e" "EnvironmentType" "Total Environments")
-            (New-BarChartVisual "barCapacity" 440 160 400 300 2001 "Environments" "e" "DisplayName" "Total Capacity GB")
-            (New-TableVisual "tblEnvs" 20 480 860 220 3000 "Environments" "e" @("DisplayName","EnvironmentType","Region","IsDataverseEnabled","DatabaseUsedMb","FileUsedMb"))
+            (New-CardVisual "cardTotalEnv" 20 20 145 100 100 "Environments" "Total Environments" "Environments")
+            (New-CardVisual "cardProdEnv" 185 20 145 100 200 "Environments" "Production Environments" "Production")
+            (New-CardVisual "cardSandboxEnv" 350 20 145 100 300 "Environments" "Sandbox Environments" "Sandbox")
+            (New-CardVisual "cardDataverse" 515 20 145 100 400 "Environments" "Dataverse Enabled" "Dataverse")
+            (New-CardVisual "cardCapacity" 680 20 145 100 500 "Environments" "Total Capacity GB" "Capacity (GB)")
+            (New-DonutVisual "donutEnvType" 20 140 400 260 1000 "Environments" "EnvironmentType" "Total Environments" "Environment Types")
+            (New-BarChartVisual "barCapacity" 440 140 400 260 2000 "Environments" "DisplayName" "Total Capacity GB" "Capacity by Environment")
+            (New-TableVisual "tblEnvs" 20 420 820 280 3000 "Environments" @("DisplayName","EnvironmentType","Region","IsDataverseEnabled","DatabaseUsedMb","FileUsedMb") "Environment Details")
         )
     }
     apps = @{
         displayName = "Apps"
         visuals = @(
-            (New-CardVisual "cardTotalApps" 20 20 200 120 1000 "Apps" "a" "Total Apps")
-            (New-CardVisual "cardCanvas" 240 20 200 120 1001 "Apps" "a" "Canvas Apps")
-            (New-CardVisual "cardModelDriven" 460 20 200 120 1002 "Apps" "a" "Model-Driven Apps")
-            (New-CardVisual "cardPremium" 680 20 200 120 1003 "Apps" "a" "Premium API Apps")
-            (New-CardVisual "cardSolutionApps" 900 20 200 120 1004 "Apps" "a" "Solution-Aware Apps")
-            (New-DonutVisual "donutAppType" 20 160 400 300 2000 "Apps" "a" "AppType" "Total Apps")
-            (New-BarChartVisual "barAppsByEnv" 440 160 400 300 2001 "Apps" "a" "EnvironmentName" "Total Apps")
-            (New-TableVisual "tblApps" 20 480 860 220 3000 "Apps" "a" @("DisplayName","AppType","OwnerDisplayName","EnvironmentName","SharedUsersCount","LastModifiedTime"))
+            (New-CardVisual "cardTotalApps" 20 20 145 100 100 "Apps" "Total Apps" "Apps")
+            (New-CardVisual "cardCanvas" 185 20 145 100 200 "Apps" "Canvas Apps" "Canvas")
+            (New-CardVisual "cardModelDriven" 350 20 145 100 300 "Apps" "Model-Driven Apps" "Model-Driven")
+            (New-CardVisual "cardPremium" 515 20 145 100 400 "Apps" "Premium API Apps" "Premium")
+            (New-CardVisual "cardSolutionApps" 680 20 145 100 500 "Apps" "Solution-Aware Apps" "Solution-Aware")
+            (New-DonutVisual "donutAppType" 20 140 400 260 1000 "Apps" "AppType" "Total Apps" "App Types")
+            (New-BarChartVisual "barAppsByEnv" 440 140 400 260 2000 "Apps" "EnvironmentName" "Total Apps" "Apps by Environment")
+            (New-TableVisual "tblApps" 20 420 820 280 3000 "Apps" @("DisplayName","AppType","OwnerDisplayName","EnvironmentName","SharedUsersCount","LastModifiedTime") "App Details")
         )
     }
     flows = @{
         displayName = "Flows"
         visuals = @(
-            (New-CardVisual "cardTotalFlows" 20 20 200 120 1000 "Flows" "f" "Total Flows")
-            (New-CardVisual "cardActive" 240 20 200 120 1001 "Flows" "f" "Active Flows")
-            (New-CardVisual "cardSuspended" 460 20 200 120 1002 "Flows" "f" "Suspended Flows")
-            (New-CardVisual "cardStopped" 680 20 200 120 1003 "Flows" "f" "Stopped Flows")
-            (New-CardVisual "cardManagedFlows" 900 20 200 120 1004 "Flows" "f" "Managed Flows")
-            (New-DonutVisual "donutFlowState" 20 160 400 300 2000 "Flows" "f" "State" "Total Flows")
-            (New-BarChartVisual "barFlowsByEnv" 440 160 400 300 2001 "Flows" "f" "EnvironmentName" "Total Flows")
-            (New-TableVisual "tblFlows" 20 480 860 220 3000 "Flows" "f" @("DisplayName","State","CreatorDisplayName","TriggerType","EnvironmentName","LastModifiedTime"))
-            (New-TableVisual "tblFlowActions" 20 720 860 220 3001 "FlowActions" "fa" @("Name","ActionType","ConnectorId","OperationId","EndpointUrl"))
+            (New-CardVisual "cardTotalFlows" 20 20 145 100 100 "Flows" "Total Flows" "Flows")
+            (New-CardVisual "cardActive" 185 20 145 100 200 "Flows" "Active Flows" "Active")
+            (New-CardVisual "cardSuspended" 350 20 145 100 300 "Flows" "Suspended Flows" "Suspended")
+            (New-CardVisual "cardStopped" 515 20 145 100 400 "Flows" "Stopped Flows" "Stopped")
+            (New-CardVisual "cardManagedFlows" 680 20 145 100 500 "Flows" "Managed Flows" "Managed")
+            (New-DonutVisual "donutFlowState" 20 140 400 260 1000 "Flows" "State" "Total Flows" "Flow States")
+            (New-BarChartVisual "barFlowsByEnv" 440 140 400 260 2000 "Flows" "EnvironmentName" "Total Flows" "Flows by Environment")
+            (New-TableVisual "tblFlows" 20 420 820 140 3000 "Flows" @("DisplayName","State","CreatorDisplayName","TriggerType","EnvironmentName","LastModifiedTime") "Flow Details")
+            (New-TableVisual "tblFlowActions" 20 580 820 120 4000 "FlowActions" @("Name","ActionType","ConnectorId","OperationId","EndpointUrl") "Flow Actions")
         )
     }
     connectors = @{
         displayName = "Connectors"
         visuals = @(
-            (New-CardVisual "cardTotalConn" 20 20 200 120 1000 "Connectors" "c" "Total Connectors")
-            (New-CardVisual "cardCustomConn" 240 20 200 120 1001 "Connectors" "c" "Custom Connectors")
-            (New-CardVisual "cardPremConn" 460 20 200 120 1002 "Connectors" "c" "Premium Connectors")
-            (New-CardVisual "cardTotalConns" 680 20 200 120 1003 "Connections" "cx" "Total Connections")
-            (New-CardVisual "cardErrorConns" 900 20 200 120 1004 "Connections" "cx" "Error Connections")
-            (New-DonutVisual "donutConnTier" 20 160 400 300 2000 "Connectors" "c" "Tier" "Total Connectors")
-            (New-DonutVisual "donutConnStatus" 440 160 400 300 2001 "Connections" "cx" "Status" "Total Connections")
-            (New-TableVisual "tblConnectors" 20 480 860 220 3000 "Connectors" "c" @("DisplayName","Tier","Publisher","IsCustom","EnvironmentName"))
-            (New-TableVisual "tblConnUrls" 20 720 860 220 3001 "Connections" "cx" @("DisplayName","ConnectionUrl","Status","CreatedByName","EnvironmentName"))
+            (New-CardVisual "cardTotalConn" 20 20 145 100 100 "Connectors" "Total Connectors" "Connectors")
+            (New-CardVisual "cardCustomConn" 185 20 145 100 200 "Connectors" "Custom Connectors" "Custom")
+            (New-CardVisual "cardPremConn" 350 20 145 100 300 "Connectors" "Premium Connectors" "Premium")
+            (New-CardVisual "cardTotalConns" 515 20 145 100 400 "Connections" "Total Connections" "Connections")
+            (New-CardVisual "cardErrorConns" 680 20 145 100 500 "Connections" "Error Connections" "Errors")
+            (New-DonutVisual "donutConnTier" 20 140 400 260 1000 "Connectors" "Tier" "Total Connectors" "Connector Tiers")
+            (New-DonutVisual "donutConnStatus" 440 140 400 260 2000 "Connections" "Status" "Total Connections" "Connection Status")
+            (New-TableVisual "tblConnectors" 20 420 820 140 3000 "Connectors" @("DisplayName","Tier","Publisher","IsCustom","EnvironmentName") "Connector Details")
+            (New-TableVisual "tblConnUrls" 20 580 820 120 4000 "Connections" @("DisplayName","ConnectionUrl","Status","CreatedByName","EnvironmentName") "Connections with URLs")
         )
     }
     dlp = @{
         displayName = "DLP Policies"
         visuals = @(
-            (New-CardVisual "cardTotalDlp" 20 20 200 120 1000 "DlpPolicies" "dp" "Total DLP Policies")
-            (New-CardVisual "cardEnabledDlp" 240 20 200 120 1001 "DlpPolicies" "dp" "Enabled Policies")
-            (New-CardVisual "cardBizConn" 460 20 200 120 1002 "DlpConnectorRules" "dr" "Business Connectors")
-            (New-CardVisual "cardNonBizConn" 680 20 200 120 1003 "DlpConnectorRules" "dr" "Non-Business Connectors")
-            (New-CardVisual "cardBlockedConn" 900 20 200 120 1004 "DlpConnectorRules" "dr" "Blocked Connectors")
-            (New-DonutVisual "donutDlpClass" 20 160 400 300 2000 "DlpConnectorRules" "dr" "Classification" "Blocked Connectors")
-            (New-TableVisual "tblDlpPolicies" 440 160 420 300 2001 "DlpPolicies" "dp" @("DisplayName","IsEnabled","EnvironmentScope","LastModifiedTime"))
-            (New-TableVisual "tblDlpRules" 20 480 860 220 3000 "DlpConnectorRules" "dr" @("PolicyName","ConnectorName","Classification"))
+            (New-CardVisual "cardTotalDlp" 20 20 145 100 100 "DlpPolicies" "Total DLP Policies" "DLP Policies")
+            (New-CardVisual "cardEnabledDlp" 185 20 145 100 200 "DlpPolicies" "Enabled Policies" "Enabled")
+            (New-CardVisual "cardBizConn" 350 20 145 100 300 "DlpConnectorRules" "Business Connectors" "Business")
+            (New-CardVisual "cardNonBizConn" 515 20 145 100 400 "DlpConnectorRules" "Non-Business Connectors" "Non-Business")
+            (New-CardVisual "cardBlockedConn" 680 20 145 100 500 "DlpConnectorRules" "Blocked Connectors" "Blocked")
+            (New-DonutVisual "donutDlpClass" 20 140 400 260 1000 "DlpConnectorRules" "Classification" "Blocked Connectors" "Classification Breakdown")
+            (New-TableVisual "tblDlpPolicies" 440 140 400 260 2000 "DlpPolicies" @("DisplayName","IsEnabled","EnvironmentScope","LastModifiedTime") "DLP Policies")
+            (New-TableVisual "tblDlpRules" 20 420 820 280 3000 "DlpConnectorRules" @("PolicyName","ConnectorName","Classification") "Connector Rules")
         )
     }
     usage = @{
         displayName = "Usage Analytics"
         visuals = @(
-            (New-CardVisual "cardUniqueUsers" 20 20 200 120 1000 "UsageAnalytics" "u" "Total Unique Users")
-            (New-CardVisual "cardSessions" 240 20 200 120 1001 "UsageAnalytics" "u" "Total Sessions")
-            (New-CardVisual "cardActions" 460 20 200 120 1002 "UsageAnalytics" "u" "Total Actions")
-            (New-BarChartVisual "barUsageByType" 20 160 400 300 2000 "UsageAnalytics" "u" "ResourceType" "Total Sessions")
-            (New-TableVisual "tblUsage" 440 160 420 300 2001 "UsageAnalytics" "u" @("ResourceType","EnvironmentId","Date","UniqueUsers","TotalSessions","TotalActions"))
+            (New-CardVisual "cardUniqueUsers" 20 20 145 100 100 "UsageAnalytics" "Total Unique Users" "Users")
+            (New-CardVisual "cardSessions" 185 20 145 100 200 "UsageAnalytics" "Total Sessions" "Sessions")
+            (New-CardVisual "cardActions" 350 20 145 100 300 "UsageAnalytics" "Total Actions" "Actions")
+            (New-BarChartVisual "barUsageByType" 20 140 400 260 1000 "UsageAnalytics" "ResourceType" "Total Sessions" "Sessions by Resource Type")
+            (New-TableVisual "tblUsage" 440 140 400 260 2000 "UsageAnalytics" @("ResourceType","EnvironmentId","Date","UniqueUsers","TotalSessions","TotalActions") "Usage Details")
         )
     }
 }
@@ -741,13 +793,12 @@ foreach ($pageName in $pageNames) {
     $pageDir = "$defDir/pages/$pageName"
 
     Write-JsonFile "$pageDir/page.json" ([ordered]@{
-        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json"
+        '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/1.3.0/schema.json"
         name = $pageName
         displayName = $pageDef.displayName
         displayOption = "FitToPage"
         height = 720
         width = 1280
-        visibility = "AlwaysVisible"
     })
 
     foreach ($visual in $pageDef.visuals) {
