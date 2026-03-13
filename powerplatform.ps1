@@ -42,6 +42,8 @@ Connect-AzAccount | Out-Null
 
 $script:ppToken = $null
 $script:ppTokenExpiry = [datetime]::MinValue
+$script:flowToken = $null
+$script:flowTokenExpiry = [datetime]::MinValue
 $script:adminToken = $null
 $script:adminTokenExpiry = [datetime]::MinValue
 
@@ -53,6 +55,16 @@ function Get-PPToken {
         [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($result.Token))
     $script:ppTokenExpiry = [datetime]::UtcNow.AddMinutes(45)  # Refresh 15 min before expiry
     return $script:ppToken
+}
+
+function Get-FlowToken {
+    if ([datetime]::UtcNow -lt $script:flowTokenExpiry) { return $script:flowToken }
+    Write-Host "  [Auth] Refreshing Flow API token..." -ForegroundColor DarkGray
+    $result = Get-AzAccessToken -ResourceUrl "https://service.flow.microsoft.com/" -AsSecureString
+    $script:flowToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($result.Token))
+    $script:flowTokenExpiry = [datetime]::UtcNow.AddMinutes(45)
+    return $script:flowToken
 }
 
 function Get-AdminToken {
@@ -102,11 +114,15 @@ function Invoke-PPApi {
 }
 
 function Invoke-PPApiPaged {
-    param([string]$Uri, [string]$Token)
+    param(
+        [string]$Uri,
+        [string]$Token,
+        [scriptblock]$TokenRefresh = { Get-PPToken }
+    )
     $all = [System.Collections.Generic.List[object]]::new()
     $url = $Uri
     while ($url) {
-        $Token = Get-PPToken  # Refresh token if needed before each page
+        $Token = & $TokenRefresh  # Refresh token if needed before each page
         $response = Invoke-PPApi -Uri $url -Token $Token
         if ($null -eq $response) { break }
         if ($response.value) { $all.AddRange([object[]]$response.value) }
@@ -267,26 +283,47 @@ foreach ($env in $environments) {
     }
 
     # --- FLOWS ---
-    # Use V2 list (works with standard admin perms) then per-flow GET for definition details
     try {
-        $token = Get-PPToken
-        $flows = Invoke-PPApiPaged -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows?$apiVer" -Token $token
+        $flowsUri = "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows?$apiVer"
+        # Try flow-scoped token first, fall back to PowerApps token
+        $flows = $null
+        $flowTokenRefresh = { Get-FlowToken }
+        try {
+            $fToken = Get-FlowToken
+            $flows = Invoke-PPApiPaged -Uri $flowsUri -Token $fToken -TokenRefresh $flowTokenRefresh
+        }
+        catch {
+            Write-Host "    Flow token failed ($($_.Exception.Message)), trying PowerApps token..." -ForegroundColor DarkGray
+            $flowTokenRefresh = { Get-PPToken }
+            $fToken = Get-PPToken
+            $flows = Invoke-PPApiPaged -Uri $flowsUri -Token $fToken -TokenRefresh $flowTokenRefresh
+        }
+        if ($flows -and $flows.Count -gt 0) {
+            Write-Host "    Found $($flows.Count) flows" -ForegroundColor DarkGray
+        }
         foreach ($f in $flows) {
-            # V2 list has basic info only — fetch full flow details for definitionSummary
-            $flowDetail = $null
-            try {
-                $token = Get-PPToken
-                $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows/$($f.name)?$apiVer" -Token $token
-            }
-            catch {
-                # Non-fatal: we still have basic flow info from V2 list
+            # V2 list returns basic info. Per-flow GET for details only with -IncludeFlowDefinitions.
+            $triggers = $null
+            $actions = $null
+            $creatorId = ""; $creatorName = ""
+
+            if ($IncludeFlowDefinitions) {
+                try {
+                    $fToken = & $flowTokenRefresh
+                    $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows/$($f.name)?$apiVer" -Token $fToken
+                    if ($flowDetail) {
+                        $triggers = $flowDetail.properties.definitionSummary.triggers
+                        $actions = $flowDetail.properties.definitionSummary.actions
+                        $creatorId = $flowDetail.properties.creator.objectId
+                        $creatorName = $flowDetail.properties.creator.displayName
+                    }
+                }
+                catch {
+                    # Non-fatal — continue with basic flow info
+                }
             }
 
-            $triggers = $flowDetail.properties.definitionSummary.triggers
             $triggerType = if ($triggers -and $triggers.Count -gt 0) { $triggers[0].type } else { "Unknown" }
-            # Creator comes from the detail response
-            $creatorId = if ($flowDetail) { $flowDetail.properties.creator.objectId } else { "" }
-            $creatorName = if ($flowDetail) { $flowDetail.properties.creator.displayName } else { "" }
 
             Append-CsvRow "$OutputPath/Flows.csv" ([PSCustomObject]@{
                 FlowId=$f.name; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
@@ -300,7 +337,7 @@ foreach ($env in $environments) {
             })
             $totalFlows++
 
-            if ($flowDetail) {
+            if ($triggers) {
                 $pos = 0
                 foreach ($t in $triggers) {
                     $trigConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
@@ -309,8 +346,9 @@ foreach ($env in $environments) {
                     })
                     $pos++; $totalTriggers++
                 }
+            }
 
-                $actions = $flowDetail.properties.definitionSummary.actions
+            if ($actions) {
                 $pos = 0
                 foreach ($a in $actions) {
                     $actConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
@@ -330,16 +368,7 @@ foreach ($env in $environments) {
     # --- CONNECTORS & CONNECTIONS ---
     try {
         $token = Get-PPToken
-        # Try admin endpoint first, then non-admin as fallback. Include showApisWithToS to get full list.
-        $connectors = $null
-        try {
-            $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis?$apiVer&showApisWithToS=true" -Token $token
-        }
-        catch {
-            # Fallback to non-admin endpoint
-            $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/apis?$apiVer&`$filter=environment eq '$envId'&showApisWithToS=true" -Token $token
-        }
-        if ($null -eq $connectors) { $connectors = @() }
+        $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis?$apiVer" -Token $token
         foreach ($c in $connectors) {
             Append-CsvRow "$OutputPath/Connectors.csv" ([PSCustomObject]@{
                 ConnectorId=($c.name -replace '.*/apis/', ''); EnvironmentId=$envId; EnvironmentName=$env.DisplayName
@@ -546,8 +575,8 @@ if ($IncludePermissions) {
             Write-Host "    Flow permissions: $i / $($flowsCsv.Count) ($totalFlowPerms perms)" -ForegroundColor DarkGray
         }
         try {
-            $token = Get-PPToken
-            $perms = Invoke-PPApiPaged -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$($f.EnvironmentId)/flows/$($f.FlowId)/permissions?$apiVer" -Token $token
+            $fToken = Get-FlowToken
+            $perms = Invoke-PPApiPaged -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$($f.EnvironmentId)/flows/$($f.FlowId)/permissions?$apiVer" -Token $fToken -TokenRefresh { Get-FlowToken }
             foreach ($p in $perms) {
                 Append-CsvRow "$OutputPath/FlowPermissions.csv" ([PSCustomObject]@{
                     FlowId=$f.FlowId; FlowName=$f.DisplayName; EnvironmentId=$f.EnvironmentId
