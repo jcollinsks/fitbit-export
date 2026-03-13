@@ -245,8 +245,9 @@ foreach ($env in $environments) {
 
     Write-Host "  [$envIndex/$envCount] $($env.DisplayName) ($pct% — ETA: $eta)" -ForegroundColor Gray
 
-    # --- CONNECTORS & CONNECTIONS (fetched first to build URL lookup for apps and flows) ---
-    $envConnLookup = @{}  # connectionName → URL for cross-referencing with flows
+    # --- CONNECTORS & CONNECTIONS (fetched first to build URL lookups for apps and flows) ---
+    $envConnByName = @{}   # connectionName → URL (exact match)
+    $envConnByType = @{}   # connectorId → [list of unique URLs] (all connections for that connector type)
     try {
         $token = Get-PPToken
         $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis?$apiVer&showApisWithToS=true" -Token $token
@@ -291,8 +292,17 @@ foreach ($env in $environments) {
                 }
             }
 
-            # Build lookup for flow cross-referencing
-            if ($connUrl) { $envConnLookup[$c.name] = $connUrl }
+            # Build lookups for cross-referencing with apps and flows
+            if ($connUrl) {
+                $envConnByName[$c.name] = $connUrl
+                # Group all URLs by connector type (e.g. shared_sharepointonline → all SP site URLs)
+                if (-not $envConnByType.ContainsKey($connId)) {
+                    $envConnByType[$connId] = [System.Collections.Generic.List[string]]::new()
+                }
+                if (-not $envConnByType[$connId].Contains($connUrl)) {
+                    $envConnByType[$connId].Add($connUrl)
+                }
+            }
 
             Append-CsvRow "$OutputPath/Connections.csv" ([PSCustomObject]@{
                 ConnectionId=$c.name; ConnectorId=$connId; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
@@ -330,22 +340,20 @@ foreach ($env in $environments) {
             Append-CsvRow "$OutputPath/Apps.csv" $row
             $totalApps++
 
-            # Extract connection references — resolve URLs via connection lookup
+            # Extract connection references — resolve URLs via connector type lookup
             if ($app.properties.connectionReferences) {
                 foreach ($ref in $app.properties.connectionReferences.PSObject.Properties) {
                     $connId = $ref.Value.id -replace '.*/apis/', ''
+                    # Resolve URL: try exact connection name match first, then all URLs for this connector type
                     $refUrl = ""
-                    # Try dataSources first (some apps expose this)
-                    if ($ref.Value.datasets) { $refUrl = ($ref.Value.datasets -join "; ") }
-                    if (-not $refUrl -and $ref.Value.dataSources) { $refUrl = ($ref.Value.dataSources -join "; ") }
-                    # Cross-reference: get connectionName from ref, look up URL from connections
-                    if (-not $refUrl) {
-                        $appConnName = if ($ref.Value.connectionName) { $ref.Value.connectionName }
-                                       elseif ($ref.Value.connection -and $ref.Value.connection.name) { $ref.Value.connection.name }
-                                       else { "" }
-                        if ($appConnName -and $envConnLookup.ContainsKey($appConnName)) {
-                            $refUrl = $envConnLookup[$appConnName]
-                        }
+                    $appConnName = if ($ref.Value.connectionName) { $ref.Value.connectionName }
+                                   elseif ($ref.Value.connection -and $ref.Value.connection.name) { $ref.Value.connection.name }
+                                   else { "" }
+                    if ($appConnName -and $envConnByName.ContainsKey($appConnName)) {
+                        $refUrl = $envConnByName[$appConnName]
+                    }
+                    elseif ($connId -and $envConnByType.ContainsKey($connId)) {
+                        $refUrl = $envConnByType[$connId] -join "; "
                     }
                     Append-CsvRow "$OutputPath/AppConnectorRefs.csv" ([PSCustomObject]@{
                         AppId=$app.name; EnvironmentId=$envId; ConnectorId=$connId
@@ -422,8 +430,9 @@ foreach ($env in $environments) {
                 }
             }
 
-            # Build connector → ALL URLs lookup from this flow's connectionReferences + connection data
-            $flowConnUrls = @{}  # connectorId → list of unique URLs
+            # Build flow-specific connector → URL lookup from connectionReferences
+            # Then fall back to environment-wide connector type → URL lookup
+            $flowConnUrls = @{}  # connectorId → list of unique URLs (flow-specific)
             if ($connRefs) {
                 foreach ($ref in $connRefs.PSObject.Properties) {
                     $crConnId = if ($ref.Value.api -and $ref.Value.api.name) { $ref.Value.api.name }
@@ -432,12 +441,12 @@ foreach ($env in $environments) {
                     $crConnName = if ($ref.Value.connectionName) { $ref.Value.connectionName }
                                   elseif ($ref.Value.connection -and $ref.Value.connection.name) { $ref.Value.connection.name }
                                   else { "" }
-                    # Look up the connection URL from our pre-built lookup
+                    # Try exact connection name match first
                     $crUrl = ""
-                    if ($crConnName -and $envConnLookup.ContainsKey($crConnName)) {
-                        $crUrl = $envConnLookup[$crConnName]
+                    if ($crConnName -and $envConnByName.ContainsKey($crConnName)) {
+                        $crUrl = $envConnByName[$crConnName]
                     }
-                    # Collect ALL URLs per connector (a flow can have multiple connections to same connector)
+                    # Collect per-connector URLs
                     if ($crUrl) {
                         if (-not $flowConnUrls.ContainsKey($crConnId)) {
                             $flowConnUrls[$crConnId] = [System.Collections.Generic.List[string]]::new()
@@ -454,13 +463,22 @@ foreach ($env in $environments) {
                 }
             }
 
-            # --- Parse triggers from definitionSummary, resolve URLs via connection lookup ---
+            # --- Parse triggers from definitionSummary, resolve URLs ---
             $triggerType = "Unknown"
             if ($defSummary -and $defSummary.triggers) {
                 $pos = 0
                 foreach ($t in $defSummary.triggers) {
                     $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
-                    $tUrl = if ($tConnId -and $flowConnUrls.ContainsKey($tConnId)) { $flowConnUrls[$tConnId] -join "; " } else { "" }
+                    # Try flow-specific URLs first, fall back to all URLs for this connector type in the environment
+                    $tUrl = ""
+                    if ($tConnId) {
+                        if ($flowConnUrls.ContainsKey($tConnId)) {
+                            $tUrl = $flowConnUrls[$tConnId] -join "; "
+                        }
+                        elseif ($envConnByType.ContainsKey($tConnId)) {
+                            $tUrl = $envConnByType[$tConnId] -join "; "
+                        }
+                    }
                     if ($pos -eq 0) { $triggerType = $t.type }
                     Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
                         FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
@@ -470,12 +488,21 @@ foreach ($env in $environments) {
                 }
             }
 
-            # --- Parse actions from definitionSummary, resolve URLs via connection lookup ---
+            # --- Parse actions from definitionSummary, resolve URLs ---
             if ($defSummary -and $defSummary.actions) {
                 $pos = 0
                 foreach ($a in $defSummary.actions) {
                     $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
-                    $aUrl = if ($aConnId -and $flowConnUrls.ContainsKey($aConnId)) { $flowConnUrls[$aConnId] -join "; " } else { "" }
+                    # Try flow-specific URLs first, fall back to all URLs for this connector type in the environment
+                    $aUrl = ""
+                    if ($aConnId) {
+                        if ($flowConnUrls.ContainsKey($aConnId)) {
+                            $aUrl = $flowConnUrls[$aConnId] -join "; "
+                        }
+                        elseif ($envConnByType.ContainsKey($aConnId)) {
+                            $aUrl = $envConnByType[$aConnId] -join "; "
+                        }
+                    }
                     Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
                         FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
                         ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=$aUrl
