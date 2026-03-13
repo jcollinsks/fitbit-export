@@ -18,17 +18,28 @@
     This adds one API call per flow but provides complete connection mapping.
 .PARAMETER OutputPath
     Directory for CSV output files. Defaults to ./PowerPlatformExport.
+.PARAMETER IncludeFlowDefinitions
+    If set, fetches full definition for each flow to extract endpoint URLs.
+    WARNING: One API call per flow — at 60K flows this adds many hours. Off by default.
+    Without this flag, flows still get triggers/actions from definitionSummary but
+    EndpointUrl columns will be blank.
+.PARAMETER MaxFlowDefinitions
+    Limit how many flow definitions to fetch (0 = unlimited). Use with -IncludeFlowDefinitions
+    to sample a subset, e.g. -IncludeFlowDefinitions -MaxFlowDefinitions 500
 .PARAMETER IncludePermissions
     If set, fetches sharing/permissions for apps and flows.
     WARNING: One API call per resource — at 100K resources this adds hours. Off by default.
 .EXAMPLE
     .\powerplatform.ps1 -OutputPath C:\exports
+    .\powerplatform.ps1 -IncludeFlowDefinitions -MaxFlowDefinitions 500
     .\powerplatform.ps1 -IncludePermissions
 #>
 
 param(
     [string]$OutputPath = "./PowerPlatformExport",
-    [switch]$IncludePermissions
+    [switch]$IncludePermissions,
+    [switch]$IncludeFlowDefinitions,
+    [int]$MaxFlowDefinitions = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,34 +58,65 @@ $script:flowTokenExpiry = [datetime]::MinValue
 $script:adminToken = $null
 $script:adminTokenExpiry = [datetime]::MinValue
 
+function Get-TokenString {
+    param([securestring]$SecureToken)
+    [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureToken))
+}
+
 function Get-PPToken {
     if ([datetime]::UtcNow -lt $script:ppTokenExpiry) { return $script:ppToken }
     Write-Host "  [Auth] Refreshing Power Platform token..." -ForegroundColor DarkGray
-    $result = Get-AzAccessToken -ResourceUrl "https://service.powerapps.com/" -AsSecureString
-    $script:ppToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($result.Token))
-    $script:ppTokenExpiry = [datetime]::UtcNow.AddMinutes(45)
+    try {
+        $result = Get-AzAccessToken -ResourceUrl "https://service.powerapps.com/" -AsSecureString
+    }
+    catch {
+        Write-Host "  [Auth] Session expired — re-authenticating..." -ForegroundColor Yellow
+        Connect-AzAccount | Out-Null
+        $result = Get-AzAccessToken -ResourceUrl "https://service.powerapps.com/" -AsSecureString
+    }
+    $script:ppToken = Get-TokenString $result.Token
+    $script:ppTokenExpiry = [datetime]::UtcNow.AddMinutes(20)
     return $script:ppToken
 }
 
 function Get-FlowToken {
     if ([datetime]::UtcNow -lt $script:flowTokenExpiry) { return $script:flowToken }
     Write-Host "  [Auth] Refreshing Flow API token..." -ForegroundColor DarkGray
-    $result = Get-AzAccessToken -ResourceUrl "https://service.flow.microsoft.com/" -AsSecureString
-    $script:flowToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($result.Token))
-    $script:flowTokenExpiry = [datetime]::UtcNow.AddMinutes(45)
+    try {
+        $result = Get-AzAccessToken -ResourceUrl "https://service.flow.microsoft.com/" -AsSecureString
+    }
+    catch {
+        Write-Host "  [Auth] Session expired — re-authenticating..." -ForegroundColor Yellow
+        Connect-AzAccount | Out-Null
+        $result = Get-AzAccessToken -ResourceUrl "https://service.flow.microsoft.com/" -AsSecureString
+    }
+    $script:flowToken = Get-TokenString $result.Token
+    $script:flowTokenExpiry = [datetime]::UtcNow.AddMinutes(20)
     return $script:flowToken
 }
 
 function Get-AdminToken {
     if ([datetime]::UtcNow -lt $script:adminTokenExpiry) { return $script:adminToken }
     Write-Host "  [Auth] Refreshing Admin Center token..." -ForegroundColor DarkGray
-    $result = Get-AzAccessToken -ResourceUrl "https://api.powerplatform.com/" -AsSecureString
-    $script:adminToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($result.Token))
-    $script:adminTokenExpiry = [datetime]::UtcNow.AddMinutes(45)
+    try {
+        $result = Get-AzAccessToken -ResourceUrl "https://api.powerplatform.com/" -AsSecureString
+    }
+    catch {
+        Write-Host "  [Auth] Session expired — re-authenticating..." -ForegroundColor Yellow
+        Connect-AzAccount | Out-Null
+        $result = Get-AzAccessToken -ResourceUrl "https://api.powerplatform.com/" -AsSecureString
+    }
+    $script:adminToken = Get-TokenString $result.Token
+    $script:adminTokenExpiry = [datetime]::UtcNow.AddMinutes(20)
     return $script:adminToken
+}
+
+# Force-expire all cached tokens so the next API call gets a fresh one
+function Reset-AllTokens {
+    $script:ppTokenExpiry = [datetime]::MinValue
+    $script:flowTokenExpiry = [datetime]::MinValue
+    $script:adminTokenExpiry = [datetime]::MinValue
 }
 
 # ============================================================================
@@ -86,7 +128,8 @@ function Invoke-PPApi {
         [string]$Uri,
         [string]$Token,
         [string]$Method = "GET",
-        [int]$MaxRetries = 5
+        [int]$MaxRetries = 5,
+        [scriptblock]$TokenRefresh = $null
     )
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
         try {
@@ -95,15 +138,21 @@ function Invoke-PPApi {
         }
         catch {
             $status = $_.Exception.Response.StatusCode.value__
-            if ($status -eq 429 -and $attempt -lt $MaxRetries) {
+            if ($status -eq 401 -and $attempt -lt $MaxRetries) {
+                # Token expired — force refresh all tokens and retry
+                Write-Host "    [Auth] 401 Unauthorized — refreshing tokens (attempt $attempt/$MaxRetries)" -ForegroundColor Yellow
+                Reset-AllTokens
+                if ($TokenRefresh) { $Token = & $TokenRefresh }
+            }
+            elseif ($status -eq 429 -and $attempt -lt $MaxRetries) {
                 $retryAfter = 30 * [math]::Pow(2, $attempt - 1)  # 30s, 60s, 120s, 240s
                 $retryHeader = $_.Exception.Response.Headers | Where-Object { $_.Key -eq "Retry-After" }
                 if ($retryHeader) { $retryAfter = [int]$retryHeader.Value[0] }
                 Write-Host "    [Throttled] 429 — waiting ${retryAfter}s (attempt $attempt/$MaxRetries)" -ForegroundColor DarkYellow
                 Start-Sleep -Seconds $retryAfter
             }
-            elseif ($status -eq 404) {
-                return $null  # Resource not found is non-fatal
+            elseif ($status -eq 403 -or $status -eq 404) {
+                return $null  # Not found or forbidden is non-fatal
             }
             else {
                 throw
@@ -123,7 +172,7 @@ function Invoke-PPApiPaged {
     $url = $Uri
     while ($url) {
         $Token = & $TokenRefresh  # Refresh token if needed before each page
-        $response = Invoke-PPApi -Uri $url -Token $Token
+        $response = Invoke-PPApi -Uri $url -Token $Token -TokenRefresh $TokenRefresh
         if ($null -eq $response) { break }
         if ($response.value) { $all.AddRange([object[]]$response.value) }
         $url = if ($response.nextLink) { $response.nextLink }
@@ -392,62 +441,62 @@ foreach ($env in $environments) {
             $flows = Invoke-PPApiPaged -Uri $flowsUri -Token $fToken -TokenRefresh $flowTokenRefresh
         }
         if ($flows -and $flows.Count -gt 0) {
-            Write-Host "    Found $($flows.Count) flows — fetching definitions..." -ForegroundColor DarkGray
+            $fetchDefs = $IncludeFlowDefinitions
+            $defLimit = if ($MaxFlowDefinitions -gt 0) { $MaxFlowDefinitions } else { $flows.Count }
+            $defMsg = if ($fetchDefs) { "fetching definitions (limit: $defLimit)..." } else { "using list data (use -IncludeFlowDefinitions for endpoint URLs)..." }
+            Write-Host "    Found $($flows.Count) flows — $defMsg" -ForegroundColor DarkGray
         }
 
         $flowIndex = 0
+        $defsFetched = 0
         foreach ($f in $flows) {
             $flowIndex++
-            if ($flowIndex % 50 -eq 0) {
-                Write-Host "      Flow details: $flowIndex / $($flows.Count)" -ForegroundColor DarkGray
+            if ($flowIndex % 100 -eq 0) {
+                $flowPct = [math]::Round(($flowIndex / $flows.Count) * 100)
+                Write-Host "      Flows: $flowIndex / $($flows.Count) ($flowPct%)" -ForegroundColor DarkGray
             }
 
-            # Fetch flow detail — try maker endpoint first (returns full definition with
-            # input parameters containing actual URLs), fall back to admin endpoint
-            $flowDefinition = $null   # properties.definition (full workflow JSON with parameters)
-            $defSummary = $null       # properties.definitionSummary (connector IDs only, no URLs)
-            $creatorId = ""; $creatorName = ""
-            $connRefs = $null
+            # Use data from the V2 list response (always available, no extra API call)
+            $flowDefinition = $null
+            $defSummary = $f.properties.definitionSummary
+            $creatorId = if ($f.properties.creator) { $f.properties.creator.objectId } else { "" }
+            $creatorName = if ($f.properties.creator) { $f.properties.creator.displayName } else { "" }
+            $connRefs = $f.properties.connectionReferences
 
-            # 1. Maker endpoint — returns properties.definition with full input parameters
-            try {
-                $fToken = & $flowTokenRefresh
-                $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken
-                if ($flowDetail) {
-                    $flowDefinition = $flowDetail.properties.definition
-                    $defSummary = $flowDetail.properties.definitionSummary
-                    $creatorId = $flowDetail.properties.creator.objectId
-                    $creatorName = $flowDetail.properties.creator.displayName
-                    $connRefs = $flowDetail.properties.connectionReferences
-                }
-            }
-            catch {
-                # 2. Admin V1 endpoint — may return definition on some tenants
+            # Optionally fetch full definition (1 API call per flow — slow at scale)
+            if ($fetchDefs -and $defsFetched -lt $defLimit) {
+                $defsFetched++
                 try {
                     $fToken = & $flowTokenRefresh
-                    $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken
+                    # Maker endpoint returns properties.definition with full input parameters
+                    $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken -TokenRefresh $flowTokenRefresh
                     if ($flowDetail) {
                         $flowDefinition = $flowDetail.properties.definition
-                        $defSummary = $flowDetail.properties.definitionSummary
-                        $creatorId = $flowDetail.properties.creator.objectId
-                        $creatorName = $flowDetail.properties.creator.displayName
-                        $connRefs = $flowDetail.properties.connectionReferences
+                        if ($flowDetail.properties.definitionSummary) { $defSummary = $flowDetail.properties.definitionSummary }
+                        if ($flowDetail.properties.creator) {
+                            $creatorId = $flowDetail.properties.creator.objectId
+                            $creatorName = $flowDetail.properties.creator.displayName
+                        }
+                        if ($flowDetail.properties.connectionReferences) { $connRefs = $flowDetail.properties.connectionReferences }
                     }
                 }
                 catch {
-                    # 3. Admin V2 — last resort, usually only has definitionSummary
+                    # Maker failed — try admin V1
                     try {
                         $fToken = & $flowTokenRefresh
-                        $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows/$($f.name)?$apiVer" -Token $fToken
+                        $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken -TokenRefresh $flowTokenRefresh
                         if ($flowDetail) {
-                            $defSummary = $flowDetail.properties.definitionSummary
-                            $creatorId = $flowDetail.properties.creator.objectId
-                            $creatorName = $flowDetail.properties.creator.displayName
-                            $connRefs = $flowDetail.properties.connectionReferences
+                            $flowDefinition = $flowDetail.properties.definition
+                            if ($flowDetail.properties.definitionSummary) { $defSummary = $flowDetail.properties.definitionSummary }
+                            if ($flowDetail.properties.creator) {
+                                $creatorId = $flowDetail.properties.creator.objectId
+                                $creatorName = $flowDetail.properties.creator.displayName
+                            }
+                            if ($flowDetail.properties.connectionReferences) { $connRefs = $flowDetail.properties.connectionReferences }
                         }
                     }
                     catch {
-                        # All endpoints failed — continue with basic flow info from V2 list
+                        # Both failed — use V2 list data (already set above)
                     }
                 }
             }
