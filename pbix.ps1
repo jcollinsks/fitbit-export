@@ -671,33 +671,48 @@ Write-JsonFile "$defDir/version.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/versionMetadata/1.0.0/schema.json"
     version = "2.0.0"
 })
-Write-JsonFile "$defDir/report.json" ([ordered]@{
-    '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/report/1.0.0/schema.json"
-    layoutOptimization = "None"
-    themeCollection = @{
-        baseTheme = [ordered]@{
-            name = "CY24SU10"
-            reportVersionAtImport = "5.55"
-            type = "SharedResources"
+# Write report.json as raw JSON to avoid PowerShell hashtable serialization issues
+$reportJsonContent = @'
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/report/1.0.0/schema.json",
+  "layoutOptimization": "None",
+  "themeCollection": {
+    "baseTheme": {
+      "name": "CY24SU10",
+      "reportVersionAtImport": "5.55",
+      "type": "SharedResources"
+    }
+  },
+  "resourcePackages": [
+    {
+      "name": "SharedResources",
+      "type": "SharedResources",
+      "items": [
+        {
+          "name": "CY24SU10",
+          "path": "BaseThemes/CY24SU10.json",
+          "type": "BaseTheme"
         }
+      ]
     }
-    resourcePackages = @(@{
-        name = "SharedResources"; type = "SharedResources"
-        items = @(@{ name = "CY24SU10"; path = "BaseThemes/CY24SU10.json"; type = "BaseTheme" })
-    })
-    settings = [ordered]@{
-        useStylableVisualContainerHeader = $true
-        defaultDrillFilterOtherVisuals = $true
-        useEnhancedTooltips = $false
-    }
-    slowDataSourceSettings = [ordered]@{
-        isCrossHighlightingDisabled = $false
-        isSlicerSelectionsButtonEnabled = $false
-        isFilterSelectionsButtonEnabled = $false
-        isFieldWellButtonEnabled = $false
-        isApplyAllButtonEnabled = $false
-    }
-})
+  ],
+  "settings": {
+    "useStylableVisualContainerHeader": true,
+    "defaultDrillFilterOtherVisuals": true,
+    "useEnhancedTooltips": false
+  },
+  "slowDataSourceSettings": {
+    "isCrossHighlightingDisabled": false,
+    "isSlicerSelectionsButtonEnabled": false,
+    "isFilterSelectionsButtonEnabled": false,
+    "isFieldWellButtonEnabled": false,
+    "isApplyAllButtonEnabled": false
+  }
+}
+'@
+$reportDir2 = Split-Path "$defDir/report.json" -Parent
+if (-not (Test-Path $reportDir2)) { New-Item -ItemType Directory -Path $reportDir2 -Force | Out-Null }
+Set-Content -Path "$defDir/report.json" -Value $reportJsonContent -Encoding UTF8
 
 $pageNames = @("environments", "apps", "flows", "connectors", "dlp", "usage")
 Write-JsonFile "$defDir/pages/pages.json" ([ordered]@{
