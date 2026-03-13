@@ -141,7 +141,7 @@ function Invoke-PPApi {
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
         try {
             $headers = @{ "Authorization" = "Bearer $Token"; "Accept" = "application/json" }
-            return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $headers
+            return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $headers -TimeoutSec 60
         }
         catch {
             $status = $_.Exception.Response.StatusCode.value__
