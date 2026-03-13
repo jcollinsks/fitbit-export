@@ -38,7 +38,10 @@ function Write-JsonFile {
     param([string]$Path, [object]$Content)
     $dir = Split-Path $Path -Parent
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $Content | ConvertTo-Json -Depth 30 | Set-Content -Path $Path -Encoding UTF8
+    $json = $Content | ConvertTo-Json -Depth 30
+    $absPath = Join-Path (Resolve-Path $dir).Path (Split-Path $Path -Leaf)
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($absPath, $json, $utf8NoBom)
 }
 
 function New-ColumnDef {
@@ -236,6 +239,10 @@ function New-TableVisual {
 $projectName = "PowerPlatformGovernance"
 $reportDir = "$OutputPath/$projectName.Report"
 $modelDir = "$OutputPath/$projectName.SemanticModel"
+
+# Clean up old output to avoid stale files
+if (Test-Path $reportDir) { Remove-Item $reportDir -Recurse -Force }
+if (Test-Path $modelDir) { Remove-Item $modelDir -Recurse -Force }
 
 Write-Host "Creating PBIP project at: $OutputPath" -ForegroundColor Cyan
 
@@ -712,7 +719,8 @@ $reportJsonContent = @'
 '@
 $reportDir2 = Split-Path "$defDir/report.json" -Parent
 if (-not (Test-Path $reportDir2)) { New-Item -ItemType Directory -Path $reportDir2 -Force | Out-Null }
-Set-Content -Path "$defDir/report.json" -Value $reportJsonContent -Encoding UTF8
+$absReportJson = Join-Path (Resolve-Path $reportDir2).Path "report.json"
+[System.IO.File]::WriteAllText($absReportJson, $reportJsonContent, [System.Text.UTF8Encoding]::new($false))
 
 $pageNames = @("environments", "apps", "flows", "connectors", "dlp", "usage")
 Write-JsonFile "$defDir/pages/pages.json" ([ordered]@{
