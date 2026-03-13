@@ -566,10 +566,12 @@ $tFlowConnRefs = [ordered]@{
         (New-ColumnDef "EnvironmentId")
         (New-ColumnDef "ConnectorId")
         (New-ColumnDef "ConnectionName")
+        (New-ColumnDef "ConnectionUrl")
     )
     partitions = @((New-CsvPartition "FlowConnectionRefs" @(
         @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
-        @{Name="ConnectorId"; Type="type text"}, @{Name="ConnectionName"; Type="type text"}
+        @{Name="ConnectorId"; Type="type text"}, @{Name="ConnectionName"; Type="type text"},
+        @{Name="ConnectionUrl"; Type="type text"}
     )))
     measures = @(
         (New-MeasureDef "Total Flow Connections" "COUNTROWS('FlowConnectionRefs')")
