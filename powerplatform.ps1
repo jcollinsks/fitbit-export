@@ -387,7 +387,7 @@ foreach ($env in $environments) {
             $flows = Invoke-PPApiPaged -Uri $flowsUri -Token $fToken -TokenRefresh $flowTokenRefresh
         }
         if ($flows -and $flows.Count -gt 0) {
-            Write-Host "    Found $($flows.Count) flows — fetching details..." -ForegroundColor DarkGray
+            Write-Host "    Found $($flows.Count) flows — fetching definitions..." -ForegroundColor DarkGray
         }
 
         $flowIndex = 0
@@ -397,16 +397,19 @@ foreach ($env in $environments) {
                 Write-Host "      Flow details: $flowIndex / $($flows.Count)" -ForegroundColor DarkGray
             }
 
-            # Fetch flow detail — admin endpoint returns definitionSummary + connectionReferences
-            # (but NOT full definition with parameters — that's only on the maker endpoint)
-            $defSummary = $null
+            # Fetch flow detail — try maker endpoint first (returns full definition with
+            # input parameters containing actual URLs), fall back to admin endpoint
+            $flowDefinition = $null   # properties.definition (full workflow JSON with parameters)
+            $defSummary = $null       # properties.definitionSummary (connector IDs only, no URLs)
             $creatorId = ""; $creatorName = ""
             $connRefs = $null
 
+            # 1. Maker endpoint — returns properties.definition with full input parameters
             try {
                 $fToken = & $flowTokenRefresh
-                $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken
+                $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken
                 if ($flowDetail) {
+                    $flowDefinition = $flowDetail.properties.definition
                     $defSummary = $flowDetail.properties.definitionSummary
                     $creatorId = $flowDetail.properties.creator.objectId
                     $creatorName = $flowDetail.properties.creator.displayName
@@ -414,11 +417,12 @@ foreach ($env in $environments) {
                 }
             }
             catch {
-                # V1 individual failed — try V2 individual
+                # 2. Admin V1 endpoint — may return definition on some tenants
                 try {
                     $fToken = & $flowTokenRefresh
-                    $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows/$($f.name)?$apiVer" -Token $fToken
+                    $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/flows/$($f.name)?$apiVer" -Token $fToken
                     if ($flowDetail) {
+                        $flowDefinition = $flowDetail.properties.definition
                         $defSummary = $flowDetail.properties.definitionSummary
                         $creatorId = $flowDetail.properties.creator.objectId
                         $creatorName = $flowDetail.properties.creator.displayName
@@ -426,34 +430,147 @@ foreach ($env in $environments) {
                     }
                 }
                 catch {
-                    # Both failed — continue with basic flow info from V2 list
+                    # 3. Admin V2 — last resort, usually only has definitionSummary
+                    try {
+                        $fToken = & $flowTokenRefresh
+                        $flowDetail = Invoke-PPApi -Uri "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows/$($f.name)?$apiVer" -Token $fToken
+                        if ($flowDetail) {
+                            $defSummary = $flowDetail.properties.definitionSummary
+                            $creatorId = $flowDetail.properties.creator.objectId
+                            $creatorName = $flowDetail.properties.creator.displayName
+                            $connRefs = $flowDetail.properties.connectionReferences
+                        }
+                    }
+                    catch {
+                        # All endpoints failed — continue with basic flow info from V2 list
+                    }
                 }
             }
 
-            # Build flow-specific connector → URL lookup from connectionReferences
-            # Then fall back to environment-wide connector type → URL lookup
-            $flowConnUrls = @{}  # connectorId → list of unique URLs (flow-specific)
+            # --- Helper: extract endpoint URL from step input parameters ---
+            # This is where the actual URLs live (SharePoint sites, SQL servers, HTTP endpoints)
+            function Get-StepEndpointUrl {
+                param($Inputs)
+                if (-not $Inputs) { return "" }
+                $params = $null
+                if ($Inputs.PSObject.Properties.Name -contains 'parameters') { $params = $Inputs.parameters }
+
+                # For HTTP/webhook actions, the URL is directly on inputs
+                if (-not $params) {
+                    if ($Inputs.PSObject.Properties.Name -contains 'uri') { return "$($Inputs.uri)" }
+                    if ($Inputs.PSObject.Properties.Name -contains 'url') { return "$($Inputs.url)" }
+                    return ""
+                }
+
+                # SharePoint: dataset = site URL
+                if ($params.PSObject.Properties.Name -contains 'dataset') {
+                    $v = "$($params.dataset)"
+                    if ($v -and $v -ne '') { return $v }
+                }
+                # SQL: server/database
+                if ($params.PSObject.Properties.Name -contains 'server') {
+                    $v = "$($params.server)"
+                    if ($params.PSObject.Properties.Name -contains 'database') { $v = "$v/$($params.database)" }
+                    if ($v -and $v -ne '' -and $v -ne '/') { return $v }
+                }
+                # Generic URL fields
+                foreach ($key in @('siteUrl','token:siteUrl','serviceUrl','baseUrl','url','uri','endpoint','hostname','hostName')) {
+                    if ($params.PSObject.Properties.Name -contains $key) {
+                        $v = "$($params.$key)"
+                        if ($v -and $v -ne '') { return $v }
+                    }
+                }
+                # Dataverse: entity name as "resource"
+                if ($params.PSObject.Properties.Name -contains 'entityName') {
+                    return "dataverse:$($params.entityName)"
+                }
+                if ($params.PSObject.Properties.Name -contains 'subscriptionRequest/entityname') {
+                    return "dataverse:$($params.'subscriptionRequest/entityname')"
+                }
+                return ""
+            }
+
+            # --- Helper: extract host info (connectorId, operationId, connectionName) from step inputs ---
+            function Get-StepHostInfo {
+                param($Inputs)
+                $info = @{ ConnectorId = ""; OperationId = ""; ConnectionName = "" }
+                if (-not $Inputs -or -not ($Inputs.PSObject.Properties.Name -contains 'host')) { return $info }
+                $host_ = $Inputs.host
+                if ($host_.PSObject.Properties.Name -contains 'apiId') {
+                    $info.ConnectorId = "$($host_.apiId)" -replace '.*/apis/', ''
+                }
+                if ($host_.PSObject.Properties.Name -contains 'operationId') {
+                    $info.OperationId = "$($host_.operationId)"
+                }
+                if ($host_.PSObject.Properties.Name -contains 'connectionName') {
+                    $info.ConnectionName = "$($host_.connectionName)"
+                }
+                return $info
+            }
+
+            # --- Helper: recursively flatten actions from definition (handles Scope, Condition, ForEach, Switch) ---
+            function Get-FlattenedActions {
+                param($ActionsObj, [string]$FlowId, [string]$EnvId, [ref]$Pos)
+                $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+                if (-not $ActionsObj) { return $results }
+                foreach ($prop in $ActionsObj.PSObject.Properties) {
+                    $stepName = $prop.Name
+                    $step = $prop.Value
+                    $stepType = if ($step.PSObject.Properties.Name -contains 'type') { $step.type } else { "Unknown" }
+                    $inputs = if ($step.PSObject.Properties.Name -contains 'inputs') { $step.inputs } else { $null }
+                    $hostInfo = Get-StepHostInfo $inputs
+                    $epUrl = Get-StepEndpointUrl $inputs
+
+                    $results.Add([PSCustomObject]@{
+                        FlowId=$FlowId; EnvironmentId=$EnvId; Position=$Pos.Value; Name=$stepName
+                        ActionType=$stepType; ConnectorId=$hostInfo.ConnectorId
+                        OperationId=$hostInfo.OperationId; EndpointUrl=$epUrl
+                    })
+                    $Pos.Value++
+
+                    # Recurse into nested actions: Scope, ForEach, Until have .actions
+                    if ($step.PSObject.Properties.Name -contains 'actions' -and $step.actions) {
+                        $nested = Get-FlattenedActions $step.actions $FlowId $EnvId $Pos
+                        $results.AddRange([PSCustomObject[]]$nested)
+                    }
+                    # Condition: .else.actions
+                    if ($step.PSObject.Properties.Name -contains 'else' -and $step.else -and
+                        $step.else.PSObject.Properties.Name -contains 'actions' -and $step.else.actions) {
+                        $nested = Get-FlattenedActions $step.else.actions $FlowId $EnvId $Pos
+                        $results.AddRange([PSCustomObject[]]$nested)
+                    }
+                    # Switch: .cases.*.actions and .default.actions
+                    if ($step.PSObject.Properties.Name -contains 'cases' -and $step.cases) {
+                        foreach ($caseProp in $step.cases.PSObject.Properties) {
+                            if ($caseProp.Value.PSObject.Properties.Name -contains 'actions' -and $caseProp.Value.actions) {
+                                $nested = Get-FlattenedActions $caseProp.Value.actions $FlowId $EnvId $Pos
+                                $results.AddRange([PSCustomObject[]]$nested)
+                            }
+                        }
+                    }
+                    if ($step.PSObject.Properties.Name -contains 'default' -and $step.default -and
+                        $step.default.PSObject.Properties.Name -contains 'actions' -and $step.default.actions) {
+                        $nested = Get-FlattenedActions $step.default.actions $FlowId $EnvId $Pos
+                        $results.AddRange([PSCustomObject[]]$nested)
+                    }
+                }
+                return $results
+            }
+
+            # --- Write FlowConnectionRefs from connectionReferences ---
             if ($connRefs) {
                 foreach ($ref in $connRefs.PSObject.Properties) {
-                    $crConnId = if ($ref.Value.api -and $ref.Value.api.name) { $ref.Value.api.name }
-                                elseif ($ref.Value.id) { $ref.Value.id -replace '.*/apis/', '' }
+                    $crConnId = if ($ref.Value.PSObject.Properties.Name -contains 'id') { $ref.Value.id -replace '.*/apis/', '' }
+                                elseif ($ref.Value.PSObject.Properties.Name -contains 'api' -and $ref.Value.api.name) { $ref.Value.api.name }
                                 else { $ref.Name }
-                    $crConnName = if ($ref.Value.connectionName) { $ref.Value.connectionName }
-                                  elseif ($ref.Value.connection -and $ref.Value.connection.name) { $ref.Value.connection.name }
+                    $crConnName = if ($ref.Value.PSObject.Properties.Name -contains 'connectionName') { $ref.Value.connectionName }
                                   else { "" }
-                    # Try exact connection name match first
+                    # Resolve URL from environment connections lookup
                     $crUrl = ""
                     if ($crConnName -and $envConnByName.ContainsKey($crConnName)) {
                         $crUrl = $envConnByName[$crConnName]
-                    }
-                    # Collect per-connector URLs
-                    if ($crUrl) {
-                        if (-not $flowConnUrls.ContainsKey($crConnId)) {
-                            $flowConnUrls[$crConnId] = [System.Collections.Generic.List[string]]::new()
-                        }
-                        if (-not $flowConnUrls[$crConnId].Contains($crUrl)) {
-                            $flowConnUrls[$crConnId].Add($crUrl)
-                        }
+                    } elseif ($crConnId -and $envConnByType.ContainsKey($crConnId)) {
+                        $crUrl = $envConnByType[$crConnId] -join "; "
                     }
 
                     Append-CsvRow "$OutputPath/FlowConnectionRefs.csv" ([PSCustomObject]@{
@@ -463,51 +580,64 @@ foreach ($env in $environments) {
                 }
             }
 
-            # --- Parse triggers from definitionSummary, resolve URLs ---
+            # --- Parse triggers and actions ---
             $triggerType = "Unknown"
-            if ($defSummary -and $defSummary.triggers) {
+            $usedFullDef = $false
+
+            # PREFERRED: Parse from full definition (has input parameters with actual URLs)
+            if ($flowDefinition -and $flowDefinition.PSObject.Properties.Name -contains 'triggers' -and $flowDefinition.triggers) {
+                $usedFullDef = $true
                 $pos = 0
-                foreach ($t in $defSummary.triggers) {
-                    $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
-                    # Try flow-specific URLs first, fall back to all URLs for this connector type in the environment
-                    $tUrl = ""
-                    if ($tConnId) {
-                        if ($flowConnUrls.ContainsKey($tConnId)) {
-                            $tUrl = $flowConnUrls[$tConnId] -join "; "
-                        }
-                        elseif ($envConnByType.ContainsKey($tConnId)) {
-                            $tUrl = $envConnByType[$tConnId] -join "; "
-                        }
-                    }
-                    if ($pos -eq 0) { $triggerType = $t.type }
+                foreach ($prop in $flowDefinition.triggers.PSObject.Properties) {
+                    $stepName = $prop.Name
+                    $trig = $prop.Value
+                    $tType = if ($trig.PSObject.Properties.Name -contains 'type') { $trig.type } else { "Unknown" }
+                    $inputs = if ($trig.PSObject.Properties.Name -contains 'inputs') { $trig.inputs } else { $null }
+                    $hostInfo = Get-StepHostInfo $inputs
+                    $epUrl = Get-StepEndpointUrl $inputs
+                    if ($pos -eq 0) { $triggerType = $tType }
                     Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
-                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
-                        TriggerType=$t.type; ConnectorId=$tConnId; OperationId=$t.swaggerOperationId; EndpointUrl=$tUrl
+                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=$stepName
+                        TriggerType=$tType; ConnectorId=$hostInfo.ConnectorId
+                        OperationId=$hostInfo.OperationId; EndpointUrl=$epUrl
                     })
                     $pos++; $totalTriggers++
                 }
+
+                if ($flowDefinition.PSObject.Properties.Name -contains 'actions' -and $flowDefinition.actions) {
+                    $actionPos = [ref]0
+                    $flatActions = Get-FlattenedActions $flowDefinition.actions $f.name $envId $actionPos
+                    foreach ($act in $flatActions) {
+                        Append-CsvRow "$OutputPath/FlowActions.csv" $act
+                        $totalActions++
+                    }
+                }
             }
 
-            # --- Parse actions from definitionSummary, resolve URLs ---
-            if ($defSummary -and $defSummary.actions) {
-                $pos = 0
-                foreach ($a in $defSummary.actions) {
-                    $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
-                    # Try flow-specific URLs first, fall back to all URLs for this connector type in the environment
-                    $aUrl = ""
-                    if ($aConnId) {
-                        if ($flowConnUrls.ContainsKey($aConnId)) {
-                            $aUrl = $flowConnUrls[$aConnId] -join "; "
-                        }
-                        elseif ($envConnByType.ContainsKey($aConnId)) {
-                            $aUrl = $envConnByType[$aConnId] -join "; "
-                        }
+            # FALLBACK: Parse from definitionSummary (no URLs, but we get connector IDs)
+            if (-not $usedFullDef -and $defSummary) {
+                if ($defSummary.triggers) {
+                    $pos = 0
+                    foreach ($t in $defSummary.triggers) {
+                        $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
+                        if ($pos -eq 0) { $triggerType = $t.type }
+                        Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
+                            FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
+                            TriggerType=$t.type; ConnectorId=$tConnId; OperationId=$t.swaggerOperationId; EndpointUrl=""
+                        })
+                        $pos++; $totalTriggers++
                     }
-                    Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
-                        FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
-                        ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=$aUrl
-                    })
-                    $pos++; $totalActions++
+                }
+                if ($defSummary.actions) {
+                    $pos = 0
+                    foreach ($a in $defSummary.actions) {
+                        $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
+                        Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
+                            FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
+                            ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=""
+                        })
+                        $pos++; $totalActions++
+                    }
                 }
             }
 
