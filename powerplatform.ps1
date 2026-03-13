@@ -161,6 +161,12 @@ function Invoke-PPApi {
             elseif ($status -eq 403 -or $status -eq 404) {
                 return $null  # Not found or forbidden is non-fatal
             }
+            elseif ($attempt -lt $MaxRetries) {
+                # Timeout or other transient error — wait and retry
+                $wait = 5 * $attempt
+                Write-Host "    [Retry] Error on attempt $attempt/$MaxRetries — waiting ${wait}s ($($_.Exception.Message))" -ForegroundColor DarkYellow
+                Start-Sleep -Seconds $wait
+            }
             else {
                 throw
             }
