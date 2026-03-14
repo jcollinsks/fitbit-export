@@ -339,7 +339,7 @@ foreach ($env in $environments) {
 
     # --- Per-environment timeout (3 minutes max) ---
     $envStartTime = Get-Date
-    $envTimeoutMin = 3
+    $envTimeoutMin = 10
 
     # --- CONNECTORS & CONNECTIONS (fetched first to build URL lookups for apps and flows) ---
     $envConnByName = @{}   # connectionName → URL (exact match)
@@ -363,7 +363,12 @@ foreach ($env in $environments) {
         Write-Host " $totalConnectors" -ForegroundColor DarkGray -NoNewline
         Write-Host " Connections..." -ForegroundColor DarkGray -NoNewline
         $connections = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/connections?$apiVer" -Token $token
+        $envConnCount = 0
         foreach ($c in $connections) {
+            $envConnCount++
+            if ($envConnCount % 1000 -eq 0) {
+                Write-Host "$envConnCount..." -ForegroundColor DarkGray -NoNewline
+            }
             $connId = $c.properties.apiId -replace '.*/apis/', ''
             $status = if ($c.properties.statuses -and $c.properties.statuses.Count -gt 0) { $c.properties.statuses[0].status } else { "Unknown" }
 
@@ -413,10 +418,11 @@ foreach ($env in $environments) {
             })
             $totalConnections++
         }
+        Write-Host " $envConnCount" -ForegroundColor DarkGray -NoNewline
     }
     catch {
         $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Connectors"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
-        Write-Host "    Warning (connectors): $($_.Exception.Message)" -ForegroundColor DarkYellow
+        Write-Host " Warning (connectors): $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 
     # --- TIMEOUT CHECK ---
