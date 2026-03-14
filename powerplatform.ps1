@@ -337,10 +337,15 @@ foreach ($env in $environments) {
         continue
     }
 
+    # --- Per-environment timeout (3 minutes max) ---
+    $envStartTime = Get-Date
+    $envTimeoutMin = 3
+
     # --- CONNECTORS & CONNECTIONS (fetched first to build URL lookups for apps and flows) ---
     $envConnByName = @{}   # connectionName → URL (exact match)
     $envConnByType = @{}   # connectorId → [list of unique URLs] (all connections for that connector type)
     try {
+        Write-Host "    Connectors..." -ForegroundColor DarkGray -NoNewline
         $token = Get-PPToken
         $connectors = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis?$apiVer&showApisWithToS=true" -Token $token
         if (-not $connectors) { $connectors = @() }
@@ -355,6 +360,8 @@ foreach ($env in $environments) {
             $totalConnectors++
         }
 
+        Write-Host " $totalConnectors" -ForegroundColor DarkGray -NoNewline
+        Write-Host " Connections..." -ForegroundColor DarkGray -NoNewline
         $connections = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/connections?$apiVer" -Token $token
         foreach ($c in $connections) {
             $connId = $c.properties.apiId -replace '.*/apis/', ''
@@ -412,8 +419,16 @@ foreach ($env in $environments) {
         Write-Host "    Warning (connectors): $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 
+    # --- TIMEOUT CHECK ---
+    if (((Get-Date) - $envStartTime).TotalMinutes -gt $envTimeoutMin) {
+        Write-Host "    TIMEOUT — environment took >$envTimeoutMin min, skipping to next" -ForegroundColor Red
+        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Timeout"; Error="Environment processing exceeded ${envTimeoutMin}m limit"; Timestamp=(Get-Date) })
+        continue
+    }
+
     # --- APPS (after connections so we can resolve endpoint URLs) ---
     try {
+        Write-Host " Apps..." -ForegroundColor DarkGray -NoNewline
         $token = Get-PPToken
         $apps = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apps?$apiVer" -Token $token
         foreach ($app in $apps) {
@@ -467,8 +482,17 @@ foreach ($env in $environments) {
         Write-Host "    Warning (apps): $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 
+    # --- TIMEOUT CHECK ---
+    if (((Get-Date) - $envStartTime).TotalMinutes -gt $envTimeoutMin) {
+        Write-Host ""
+        Write-Host "    TIMEOUT — environment took >$envTimeoutMin min, skipping to next" -ForegroundColor Red
+        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Timeout"; Error="Environment processing exceeded ${envTimeoutMin}m limit"; Timestamp=(Get-Date) })
+        continue
+    }
+
     # --- FLOWS ---
     try {
+        Write-Host " Flows..." -ForegroundColor DarkGray
         $flowsUri = "$flow/providers/Microsoft.ProcessSimple/scopes/admin/environments/$envId/v2/flows?$apiVer"
         # Try flow-scoped token first, fall back to PowerApps token
         $flows = $null
