@@ -145,11 +145,14 @@ function Invoke-PPApi {
         }
         catch {
             $status = $_.Exception.Response.StatusCode.value__
-            if ($status -eq 401 -and $attempt -lt $MaxRetries) {
-                # Token expired — force refresh all tokens and retry
-                Write-Host "    [Auth] 401 Unauthorized — refreshing tokens (attempt $attempt/$MaxRetries)" -ForegroundColor Yellow
+            if ($status -eq 401 -and $attempt -le 2) {
+                # Token expired — refresh and retry (max 2 attempts, then give up)
+                Write-Host "    [Auth] 401 Unauthorized — refreshing tokens (attempt $attempt/2)" -ForegroundColor Yellow
                 Reset-AllTokens
                 if ($TokenRefresh) { $Token = & $TokenRefresh }
+            }
+            elseif ($status -eq 401) {
+                return $null  # Still 401 after refresh — no access to this resource
             }
             elseif ($status -eq 429 -and $attempt -lt $MaxRetries) {
                 $retryAfter = 30 * [math]::Pow(2, $attempt - 1)  # 30s, 60s, 120s, 240s
@@ -324,6 +327,15 @@ foreach ($env in $environments) {
     } else { "calculating..." }
 
     Write-Host "  [$envIndex/$envCount] $($env.DisplayName) ($pct% — ETA: $eta)" -ForegroundColor Gray
+
+    # --- ACCESS CHECK — skip environments we can't read ---
+    $token = Get-PPToken
+    $accessCheck = Invoke-PPApi -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apps?$apiVer&`$top=1" -Token $token -TokenRefresh { Get-PPToken }
+    if ($null -eq $accessCheck) {
+        Write-Host "    SKIPPED — no access (401/403)" -ForegroundColor DarkYellow
+        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="AccessCheck"; Error="No access (401/403) — skipped entire environment"; Timestamp=(Get-Date) })
+        continue
+    }
 
     # --- CONNECTORS & CONNECTIONS (fetched first to build URL lookups for apps and flows) ---
     $envConnByName = @{}   # connectionName → URL (exact match)
