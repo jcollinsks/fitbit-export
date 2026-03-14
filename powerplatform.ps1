@@ -179,15 +179,33 @@ function Invoke-PPApiPaged {
     param(
         [string]$Uri,
         [string]$Token,
-        [scriptblock]$TokenRefresh = { Get-PPToken }
+        [scriptblock]$TokenRefresh = { Get-PPToken },
+        [int]$MaxPages = 500
     )
     $all = [System.Collections.Generic.List[object]]::new()
     $url = $Uri
+    $page = 0
+    $seenUrls = [System.Collections.Generic.HashSet[string]]::new()
     while ($url) {
+        $page++
+        if ($page -gt $MaxPages) {
+            Write-Host "    [Paging] Hit $MaxPages page limit — stopping pagination ($($all.Count) items)" -ForegroundColor DarkYellow
+            break
+        }
+        # Detect infinite loop — same URL seen twice
+        if (-not $seenUrls.Add($url)) {
+            Write-Host "    [Paging] Duplicate nextLink detected — breaking loop ($($all.Count) items)" -ForegroundColor DarkYellow
+            break
+        }
         $Token = & $TokenRefresh  # Refresh token if needed before each page
         $response = Invoke-PPApi -Uri $url -Token $Token -TokenRefresh $TokenRefresh
         if ($null -eq $response) { break }
-        if ($response.value) { $all.AddRange([object[]]$response.value) }
+        if ($response.value -and $response.value.Count -gt 0) {
+            $all.AddRange([object[]]$response.value)
+        }
+        else {
+            break  # Empty page — no more data regardless of nextLink
+        }
         $url = if ($response.nextLink) { $response.nextLink }
                elseif ($response.'@odata.nextLink') { $response.'@odata.nextLink' }
                else { $null }
