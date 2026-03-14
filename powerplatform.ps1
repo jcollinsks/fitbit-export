@@ -306,9 +306,7 @@ Initialize-Csv "$OutputPath/FlowTriggers.csv" @("FlowId","EnvironmentId","Positi
 Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowId","EnvironmentId","Position","Name","ActionType","ConnectorId","OperationId","EndpointUrl")
 Initialize-Csv "$OutputPath/FlowConnectionRefs.csv" @("FlowId","EnvironmentId","ConnectorId","ConnectionName","ConnectionUrl")
 Initialize-Csv "$OutputPath/Connectors.csv" @("ConnectorId","EnvironmentId","EnvironmentName","DisplayName","Description","Publisher","Tier","IsCustom","IconUri","CollectedAt")
-Initialize-Csv "$OutputPath/Connections.csv" @("ConnectionId","ConnectorId","EnvironmentId","EnvironmentName","DisplayName","ConnectionUrl","CreatedByObjectId","CreatedByName","CreatedByEmail","CreatedTime","Status","IsShared","CollectedAt")
-
-$totalApps = 0; $totalFlows = 0; $totalConnectors = 0; $totalConnections = 0
+$totalApps = 0; $totalFlows = 0; $totalConnectors = 0
 $totalAppConnRefs = 0; $totalTriggers = 0; $totalActions = 0; $totalFlowConnRefs = 0
 $envCount = $environments.Count
 $envIndex = 0
@@ -341,9 +339,7 @@ foreach ($env in $environments) {
     $envStartTime = Get-Date
     $envTimeoutMin = 10
 
-    # --- CONNECTORS & CONNECTIONS (fetched first to build URL lookups for apps and flows) ---
-    $envConnByName = @{}   # connectionName → URL (exact match)
-    $envConnByType = @{}   # connectorId → [list of unique URLs] (all connections for that connector type)
+    # --- CONNECTORS ---
     try {
         Write-Host "    Connectors..." -ForegroundColor DarkGray -NoNewline
         $token = Get-PPToken
@@ -359,66 +355,7 @@ foreach ($env in $environments) {
             })
             $totalConnectors++
         }
-
         Write-Host " $totalConnectors" -ForegroundColor DarkGray -NoNewline
-        Write-Host " Connections..." -ForegroundColor DarkGray -NoNewline
-        $connections = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/connections?$apiVer" -Token $token
-        $envConnCount = 0
-        foreach ($c in $connections) {
-            $envConnCount++
-            if ($envConnCount % 1000 -eq 0) {
-                Write-Host "$envConnCount..." -ForegroundColor DarkGray -NoNewline
-            }
-            $connId = $c.properties.apiId -replace '.*/apis/', ''
-            $status = if ($c.properties.statuses -and $c.properties.statuses.Count -gt 0) { $c.properties.statuses[0].status } else { "Unknown" }
-
-            # Extract connection URL from connectionParameters or connectionParametersSet
-            $connUrl = ""
-            $cp = $c.properties.connectionParameters
-            if ($cp) {
-                if ($cp.server) { $connUrl = $cp.server }
-                if ($cp.database) { $connUrl = if ($connUrl) { "$connUrl/$($cp.database)" } else { $cp.database } }
-                if (-not $connUrl -and $cp.workflowEndpoint) { $connUrl = $cp.workflowEndpoint }
-                if (-not $connUrl -and $cp.siteUrl) { $connUrl = $cp.siteUrl }
-                if (-not $connUrl -and $cp.'token:siteUrl') { $connUrl = $cp.'token:siteUrl' }
-                if (-not $connUrl -and $cp.gateway) { $connUrl = $cp.gateway }
-                if (-not $connUrl -and $cp.url) { $connUrl = $cp.url }
-                if (-not $connUrl -and $cp.serviceUrl) { $connUrl = $cp.serviceUrl }
-                if (-not $connUrl -and $cp.endpoint) { $connUrl = $cp.endpoint }
-                if (-not $connUrl -and $cp.baseUrl) { $connUrl = $cp.baseUrl }
-            }
-            if (-not $connUrl -and $c.properties.connectionParametersSet) {
-                $vals = $c.properties.connectionParametersSet.values
-                if ($vals) {
-                    if ($vals.server.value) { $connUrl = $vals.server.value }
-                    elseif ($vals.siteUrl.value) { $connUrl = $vals.siteUrl.value }
-                    elseif ($vals.url.value) { $connUrl = $vals.url.value }
-                }
-            }
-
-            # Build lookups for cross-referencing with apps and flows
-            if ($connUrl) {
-                $connUrlStr = [string]$connUrl
-                $envConnByName[$c.name] = $connUrlStr
-                # Group all URLs by connector type (e.g. shared_sharepointonline → all SP site URLs)
-                if (-not $envConnByType.ContainsKey($connId)) {
-                    $envConnByType[$connId] = [System.Collections.Generic.List[string]]::new()
-                }
-                if ($envConnByType[$connId] -notcontains $connUrlStr) {
-                    $envConnByType[$connId].Add($connUrlStr)
-                }
-            }
-
-            Append-CsvRow "$OutputPath/Connections.csv" ([PSCustomObject]@{
-                ConnectionId=$c.name; ConnectorId=$connId; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
-                DisplayName=$c.properties.displayName; ConnectionUrl=$connUrl
-                CreatedByObjectId=$c.properties.createdBy.id
-                CreatedByName=$c.properties.createdBy.displayName; CreatedByEmail=$c.properties.createdBy.email
-                CreatedTime=$c.properties.createdTime; Status=$status; IsShared=$c.properties.allowSharing; CollectedAt=$timestamp
-            })
-            $totalConnections++
-        }
-        Write-Host " $envConnCount" -ForegroundColor DarkGray -NoNewline
     }
     catch {
         $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Connectors"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
@@ -458,25 +395,14 @@ foreach ($env in $environments) {
             Append-CsvRow "$OutputPath/Apps.csv" $row
             $totalApps++
 
-            # Extract connection references — resolve URLs via connector type lookup
+            # Extract connection references
             if ($app.properties.connectionReferences) {
                 foreach ($ref in $app.properties.connectionReferences.PSObject.Properties) {
                     $connId = $ref.Value.id -replace '.*/apis/', ''
-                    # Resolve URL: try exact connection name match first, then all URLs for this connector type
-                    $refUrl = ""
-                    $appConnName = if ($ref.Value.connectionName) { $ref.Value.connectionName }
-                                   elseif ($ref.Value.connection -and $ref.Value.connection.name) { $ref.Value.connection.name }
-                                   else { "" }
-                    if ($appConnName -and $envConnByName.ContainsKey($appConnName)) {
-                        $refUrl = $envConnByName[$appConnName]
-                    }
-                    elseif ($connId -and $envConnByType.ContainsKey($connId)) {
-                        $refUrl = $envConnByType[$connId] -join "; "
-                    }
                     Append-CsvRow "$OutputPath/AppConnectorRefs.csv" ([PSCustomObject]@{
                         AppId=$app.name; EnvironmentId=$envId; ConnectorId=$connId
                         DisplayName=$ref.Value.displayName; DataSources=($ref.Value.dataSources -join "; ")
-                        EndpointUrl=$refUrl
+                        EndpointUrl=""
                     })
                     $totalAppConnRefs++
                 }
@@ -750,16 +676,9 @@ foreach ($env in $environments) {
                                 else { $ref.Name }
                     $crConnName = if ($ref.Value.PSObject.Properties.Name -contains 'connectionName') { $ref.Value.connectionName }
                                   else { "" }
-                    # Resolve URL from environment connections lookup
-                    $crUrl = ""
-                    if ($crConnName -and $envConnByName.ContainsKey($crConnName)) {
-                        $crUrl = $envConnByName[$crConnName]
-                    } elseif ($crConnId -and $envConnByType.ContainsKey($crConnId)) {
-                        $crUrl = $envConnByType[$crConnId] -join "; "
-                    }
 
                     Append-CsvRow "$OutputPath/FlowConnectionRefs.csv" ([PSCustomObject]@{
-                        FlowId=$f.name; EnvironmentId=$envId; ConnectorId=$crConnId; ConnectionName=$crConnName; ConnectionUrl=$crUrl
+                        FlowId=$f.name; EnvironmentId=$envId; ConnectorId=$crConnId; ConnectionName=$crConnName; ConnectionUrl=""
                     })
                     $totalFlowConnRefs++
                 }
@@ -850,7 +769,7 @@ foreach ($env in $environments) {
     }
 }
 
-Write-Host "  Totals: $totalApps apps, $totalFlows flows, $totalConnectors connectors, $totalConnections connections" -ForegroundColor Gray
+Write-Host "  Totals: $totalApps apps, $totalFlows flows, $totalConnectors connectors" -ForegroundColor Gray
 Write-Host "  Totals: $totalAppConnRefs app-connector refs, $totalFlowConnRefs flow-connector refs, $totalTriggers triggers, $totalActions actions" -ForegroundColor Gray
 
 # ============================================================================
@@ -1047,7 +966,6 @@ Write-Host "  3. Or Get Data > Text/CSV for individual files" -ForegroundColor G
 Write-Host "  4. Create relationships:" -ForegroundColor Gray
 Write-Host "     - Apps.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
 Write-Host "     - Flows.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
-Write-Host "     - Connections.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
 Write-Host "     - AppConnectorRefs.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
 Write-Host "     - FlowConnectionRefs.FlowId -> Flows.FlowId" -ForegroundColor Gray
 Write-Host "     - FlowConnectionRefs.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray

@@ -4,7 +4,7 @@
 .DESCRIPTION
     Creates a complete PBIP project with:
     - Semantic model (tables, relationships, DAX measures)
-    - 6 report pages: Environments, Apps, Flows, Connectors, DLP, Usage Analytics
+    - 5 report pages: Environments, Apps, Flows, Connectors, DLP, Usage Analytics
     - CSV data source with configurable folder path parameter
 
     Open the generated .pbip file in Power BI Desktop (Developer Mode enabled).
@@ -430,39 +430,6 @@ $tConnectors = [ordered]@{
     )
 }
 
-$tConnections = [ordered]@{
-    name = "Connections"; lineageTag = (New-Guid)
-    columns = @(
-        (New-ColumnDef "ConnectionId")
-        (New-ColumnDef "ConnectorId" "string" "none" $null $false $true)
-        (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
-        (New-ColumnDef "EnvironmentName")
-        (New-ColumnDef "DisplayName")
-        (New-ColumnDef "ConnectionUrl")
-        (New-ColumnDef "CreatedByObjectId")
-        (New-ColumnDef "CreatedByName")
-        (New-ColumnDef "CreatedByEmail")
-        (New-ColumnDef "CreatedTime" "dateTime" "none" "yyyy-MM-dd")
-        (New-ColumnDef "Status")
-        (New-ColumnDef "IsShared" "boolean")
-        (New-ColumnDef "CollectedAt" "dateTime")
-    )
-    partitions = @((New-CsvPartition "Connections" @(
-        @{Name="ConnectionId"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
-        @{Name="EnvironmentId"; Type="type text"}, @{Name="EnvironmentName"; Type="type text"},
-        @{Name="DisplayName"; Type="type text"}, @{Name="ConnectionUrl"; Type="type text"},
-        @{Name="CreatedByObjectId"; Type="type text"},
-        @{Name="CreatedByName"; Type="type text"}, @{Name="CreatedByEmail"; Type="type text"},
-        @{Name="CreatedTime"; Type="type datetime"}, @{Name="Status"; Type="type text"},
-        @{Name="IsShared"; Type="type logical"}, @{Name="CollectedAt"; Type="type datetime"}
-    )))
-    measures = @(
-        (New-MeasureDef "Total Connections" "COUNTROWS('Connections')")
-        (New-MeasureDef "Error Connections" "CALCULATE(COUNTROWS('Connections'), 'Connections'[Status] = `"Error`")")
-        (New-MeasureDef "Shared Connections" "CALCULATE(COUNTROWS('Connections'), 'Connections'[IsShared] = TRUE())")
-    )
-}
-
 $tDlpPolicies = [ordered]@{
     name = "DlpPolicies"; lineageTag = (New-Guid)
     columns = @(
@@ -627,13 +594,12 @@ $modelBim = [ordered]@{
         culture = "en-US"
         defaultPowerBIDataSourceVersion = "powerBI_V3"
         sourceQueryCulture = "en-US"
-        tables = @($tEnvironments, $tApps, $tFlows, $tConnectors, $tConnections,
+        tables = @($tEnvironments, $tApps, $tFlows, $tConnectors,
                     $tDlpPolicies, $tDlpRules, $tUsage, $tAppConnRefs, $tFlowActions, $tFlowTriggers, $tFlowConnRefs)
         relationships = @(
             (New-RelationshipDef "rel_Apps_Env" "Apps" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_Flows_Env" "Flows" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_Connectors_Env" "Connectors" "EnvironmentId" "Environments" "EnvironmentId")
-            (New-RelationshipDef "rel_Connections_Env" "Connections" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_DlpRules_Policy" "DlpConnectorRules" "PolicyId" "DlpPolicies" "PolicyId")
             (New-RelationshipDef "rel_Usage_Env" "UsageAnalytics" "EnvironmentId" "Environments" "EnvironmentId")
         )
@@ -645,7 +611,7 @@ $modelBim = [ordered]@{
             }
         )
         annotations = @(
-            @{ name = "PBI_QueryOrder"; value = "[`"Environments`",`"Apps`",`"Flows`",`"Connectors`",`"Connections`",`"DlpPolicies`",`"DlpConnectorRules`",`"UsageAnalytics`",`"AppConnectorRefs`",`"FlowActions`",`"FlowTriggers`",`"FlowConnectionRefs`"]" }
+            @{ name = "PBI_QueryOrder"; value = "[`"Environments`",`"Apps`",`"Flows`",`"Connectors`",`"DlpPolicies`",`"DlpConnectorRules`",`"UsageAnalytics`",`"AppConnectorRefs`",`"FlowActions`",`"FlowTriggers`",`"FlowConnectionRefs`"]" }
             @{ name = "__PBI_TimeIntelligenceEnabled"; value = "0" }
         )
     }
@@ -777,12 +743,9 @@ $pageDefs = @{
             (New-CardVisual "cardTotalConn" 20 20 145 100 100 "Connectors" "Total Connectors" "Connectors")
             (New-CardVisual "cardCustomConn" 185 20 145 100 200 "Connectors" "Custom Connectors" "Custom")
             (New-CardVisual "cardPremConn" 350 20 145 100 300 "Connectors" "Premium Connectors" "Premium")
-            (New-CardVisual "cardTotalConns" 515 20 145 100 400 "Connections" "Total Connections" "Connections")
-            (New-CardVisual "cardErrorConns" 680 20 145 100 500 "Connections" "Error Connections" "Errors")
             (New-DonutVisual "donutConnTier" 20 140 400 260 1000 "Connectors" "Tier" "Total Connectors" "Connector Tiers")
-            (New-DonutVisual "donutConnStatus" 440 140 400 260 2000 "Connections" "Status" "Total Connections" "Connection Status")
-            (New-TableVisual "tblConnectors" 20 420 820 140 3000 "Connectors" @("DisplayName","Tier","Publisher","IsCustom","EnvironmentName") "Connector Details")
-            (New-TableVisual "tblConnUrls" 20 580 820 120 4000 "Connections" @("DisplayName","ConnectionUrl","Status","CreatedByName","EnvironmentName") "Connections with URLs")
+            (New-BarChartVisual "barConnByEnv" 440 140 400 260 2000 "Connectors" "EnvironmentName" "Total Connectors" "Connectors by Environment")
+            (New-TableVisual "tblConnectors" 20 420 820 280 3000 "Connectors" @("DisplayName","Tier","Publisher","IsCustom","EnvironmentName") "Connector Details")
         )
     }
     dlp = @{
@@ -851,7 +814,7 @@ Write-Host "Pages:" -ForegroundColor Yellow
 Write-Host "  1. Environments — type distribution, capacity, Dataverse status" -ForegroundColor Gray
 Write-Host "  2. Apps — canvas vs model-driven, premium API usage, sharing" -ForegroundColor Gray
 Write-Host "  3. Flows — active/suspended/stopped, trigger types, by environment" -ForegroundColor Gray
-Write-Host "  4. Connectors — tier breakdown, connection status, custom connectors" -ForegroundColor Gray
+Write-Host "  4. Connectors — tier breakdown, custom connectors, by environment" -ForegroundColor Gray
 Write-Host "  5. DLP Policies — business/non-business/blocked classification" -ForegroundColor Gray
 Write-Host "  6. Usage Analytics — unique users, sessions, actions by resource type" -ForegroundColor Gray
 Write-Host ""
@@ -859,7 +822,6 @@ Write-Host "Relationships (auto-configured):" -ForegroundColor Yellow
 Write-Host "  Apps -> Environments (EnvironmentId)" -ForegroundColor Gray
 Write-Host "  Flows -> Environments (EnvironmentId)" -ForegroundColor Gray
 Write-Host "  Connectors -> Environments (EnvironmentId)" -ForegroundColor Gray
-Write-Host "  Connections -> Environments (EnvironmentId)" -ForegroundColor Gray
 Write-Host "  DlpConnectorRules -> DlpPolicies (PolicyId)" -ForegroundColor Gray
 Write-Host "  UsageAnalytics -> Environments (EnvironmentId)" -ForegroundColor Gray
 Write-Host "  AppConnectorRefs -> Apps (AppId)" -ForegroundColor Gray
