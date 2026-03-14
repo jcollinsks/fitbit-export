@@ -31,13 +31,16 @@
 .PARAMETER ThrottleLimit
     Max concurrent API calls for parallel flow definition fetching. Default 10.
     Increase for faster runs (20-25) or decrease if hitting rate limits (5).
+.PARAMETER Resume
+    Resume a previous interrupted run. Skips environments already processed
+    (tracked in _checkpoint.txt) and appends to existing CSVs instead of overwriting.
 .PARAMETER IncludePermissions
     If set, fetches sharing/permissions for apps and flows.
     WARNING: One API call per resource — at 100K resources this adds hours. Off by default.
 .EXAMPLE
     .\powerplatform.ps1 -OutputPath C:\exports
     .\powerplatform.ps1 -IncludeFlowDefinitions -ThrottleLimit 20
-    .\powerplatform.ps1 -IncludeFlowDefinitions -MaxFlowDefinitions 500
+    .\powerplatform.ps1 -Resume
     .\powerplatform.ps1 -IncludePermissions
 #>
 
@@ -45,6 +48,7 @@ param(
     [string]$OutputPath = "./PowerPlatformExport",
     [switch]$IncludePermissions,
     [switch]$IncludeFlowDefinitions,
+    [switch]$Resume,
     [int]$MaxFlowDefinitions = 0,
     [int]$ThrottleLimit = 10
 )
@@ -298,14 +302,34 @@ Write-Host "  Found $($environments.Count) environments" -ForegroundColor Gray
 # 2-4. APPS, FLOWS, CONNECTORS — per-environment loop with streaming CSV
 # ============================================================================
 
-# Initialize CSV files with headers
-Initialize-Csv "$OutputPath/Apps.csv" @("AppId","EnvironmentId","EnvironmentName","DisplayName","Description","AppType","OwnerObjectId","OwnerDisplayName","OwnerEmail","CreatedTime","LastModifiedTime","LastPublishedTime","AppVersion","Status","UsesPremiumApi","UsesCustomApi","SharedUsersCount","SharedGroupsCount","IsSolutionAware","SolutionId","BypassConsent","CollectedAt")
-Initialize-Csv "$OutputPath/AppConnectorRefs.csv" @("AppId","EnvironmentId","ConnectorId","DisplayName","DataSources","EndpointUrl")
-Initialize-Csv "$OutputPath/Flows.csv" @("FlowId","EnvironmentId","EnvironmentName","DisplayName","Description","State","CreatorObjectId","CreatorDisplayName","CreatedTime","LastModifiedTime","TriggerType","IsSolutionAware","SolutionId","IsManaged","SuspensionReason","CollectedAt")
-Initialize-Csv "$OutputPath/FlowTriggers.csv" @("FlowId","EnvironmentId","Position","Name","TriggerType","ConnectorId","OperationId","EndpointUrl")
-Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowId","EnvironmentId","Position","Name","ActionType","ConnectorId","OperationId","EndpointUrl")
-Initialize-Csv "$OutputPath/FlowConnectionRefs.csv" @("FlowId","EnvironmentId","ConnectorId","ConnectionName","ConnectionUrl")
-Initialize-Csv "$OutputPath/Connectors.csv" @("ConnectorId","EnvironmentId","EnvironmentName","DisplayName","Description","Publisher","Tier","IsCustom","IconUri","CollectedAt")
+# --- CHECKPOINT: track completed environments for -Resume ---
+$checkpointFile = "$OutputPath/_checkpoint.txt"
+$completedEnvs = [System.Collections.Generic.HashSet[string]]::new()
+
+if ($Resume -and (Test-Path $checkpointFile)) {
+    $completedEnvs = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@(Get-Content $checkpointFile | Where-Object { $_.Trim() -ne "" })
+    )
+    Write-Host "  Resuming: $($completedEnvs.Count) environments already completed" -ForegroundColor Cyan
+}
+
+if ($Resume -and (Test-Path "$OutputPath/Apps.csv")) {
+    # Append to existing CSVs
+    Write-Host "  Appending to existing CSV files" -ForegroundColor Cyan
+}
+else {
+    # Fresh run — initialize CSV files with headers
+    Initialize-Csv "$OutputPath/Apps.csv" @("AppId","EnvironmentId","EnvironmentName","DisplayName","Description","AppType","OwnerObjectId","OwnerDisplayName","OwnerEmail","CreatedTime","LastModifiedTime","LastPublishedTime","AppVersion","Status","UsesPremiumApi","UsesCustomApi","SharedUsersCount","SharedGroupsCount","IsSolutionAware","SolutionId","BypassConsent","CollectedAt")
+    Initialize-Csv "$OutputPath/AppConnectorRefs.csv" @("AppId","EnvironmentId","ConnectorId","DisplayName","DataSources","EndpointUrl")
+    Initialize-Csv "$OutputPath/Flows.csv" @("FlowId","EnvironmentId","EnvironmentName","DisplayName","Description","State","CreatorObjectId","CreatorDisplayName","CreatedTime","LastModifiedTime","TriggerType","IsSolutionAware","SolutionId","IsManaged","SuspensionReason","CollectedAt")
+    Initialize-Csv "$OutputPath/FlowTriggers.csv" @("FlowId","EnvironmentId","Position","Name","TriggerType","ConnectorId","OperationId","EndpointUrl")
+    Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowId","EnvironmentId","Position","Name","ActionType","ConnectorId","OperationId","EndpointUrl")
+    Initialize-Csv "$OutputPath/FlowConnectionRefs.csv" @("FlowId","EnvironmentId","ConnectorId","ConnectionName","ConnectionUrl")
+    Initialize-Csv "$OutputPath/Connectors.csv" @("ConnectorId","EnvironmentId","EnvironmentName","DisplayName","Description","Publisher","Tier","IsCustom","IconUri","CollectedAt")
+    # Clear checkpoint for fresh run
+    if (Test-Path $checkpointFile) { Remove-Item $checkpointFile }
+}
+
 $totalApps = 0; $totalFlows = 0; $totalConnectors = 0
 $totalAppConnRefs = 0; $totalTriggers = 0; $totalActions = 0; $totalFlowConnRefs = 0
 $envCount = $environments.Count
@@ -316,12 +340,22 @@ Write-Host "[2-4/7] Collecting apps, flows, connectors per environment..." -Fore
 foreach ($env in $environments) {
     $envIndex++
     $envId = $env.EnvironmentId
+
+    # Skip already-completed environments on resume
+    if ($completedEnvs.Contains($envId)) {
+        continue
+    }
+
     $elapsed = (Get-Date) - $startTime
+    $remaining_count = $envCount - $envIndex - $completedEnvs.Count + ($completedEnvs.Count)
     $pct = [math]::Round(($envIndex / $envCount) * 100)
     $eta = if ($envIndex -gt 1) {
-        $perEnv = $elapsed.TotalSeconds / ($envIndex - 1)
-        $remaining = [TimeSpan]::FromSeconds($perEnv * ($envCount - $envIndex))
-        "{0:hh\:mm\:ss}" -f $remaining
+        $processed = $envIndex - $completedEnvs.Count
+        if ($processed -gt 0) {
+            $perEnv = $elapsed.TotalSeconds / $processed
+            $remaining = [TimeSpan]::FromSeconds($perEnv * ($envCount - $envIndex))
+            "{0:hh\:mm\:ss}" -f $remaining
+        } else { "calculating..." }
     } else { "calculating..." }
 
     Write-Host "  [$envIndex/$envCount] $($env.DisplayName) ($pct% — ETA: $eta)" -ForegroundColor Gray
@@ -767,6 +801,10 @@ foreach ($env in $environments) {
         $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Flows"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
         Write-Host "    Warning (flows): $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
+
+    # Mark environment as completed in checkpoint
+    Add-Content -Path $checkpointFile -Value $envId -Encoding UTF8
+    [void]$completedEnvs.Add($envId)
 }
 
 Write-Host "  Totals: $totalApps apps, $totalFlows flows, $totalConnectors connectors" -ForegroundColor Gray
