@@ -2,7 +2,7 @@
 .SYNOPSIS
     Generates an Enterprise Governance Power BI Dashboard (PBIP) from Power Platform CSV exports.
 .DESCRIPTION
-    Creates an 8-page governance-focused PBIP project with:
+    Creates a 12-page governance-focused PBIP project with:
     - ~60 DAX measures (risk scores, staleness, trends, ratios)
     - Visual types: card, donut, bar, lineChart, treemap, gauge, slicer, columnChart, matrix, table
     - Environment slicer filtering on key pages
@@ -498,7 +498,7 @@ $tEnvironments = [ordered]@{
         (New-MeasureDef "Total File MB" "SUM('Environments'[FileUsedMb])" "#,##0.0" "Capacity")
         (New-MeasureDef "Total Capacity GB" "DIVIDE(SUM('Environments'[DatabaseUsedMb]) + SUM('Environments'[FileUsedMb]) + SUM('Environments'[LogUsedMb]), 1024, 0)" "#,##0.00" "Capacity")
         # New governance measures
-        (New-MeasureDef "Unsecured Environments" "CALCULATE(COUNTROWS('Environments'), ISBLANK('Environments'[SecurityGroupId]))")
+        (New-MeasureDef "Unsecured Environments" "CALCULATE(COUNTROWS('Environments'), ISBLANK('Environments'[SecurityGroupId]) || 'Environments'[SecurityGroupId] = `"`") + 0")
         (New-MeasureDef "Env Security Rate" "DIVIDE([Total Environments] - [Unsecured Environments], [Total Environments], 0)" "0.0%")
         (New-MeasureDef "Default Environments" "CALCULATE(COUNTROWS('Environments'), 'Environments'[IsDefault] = TRUE())")
         (New-MeasureDef "Governance Score" "[Env Security Rate] * 0.25 + (1 - [Suspension Rate]) * 0.25 + (1 - [Stale App Rate]) * 0.25 + [DLP Coverage Rate] * 0.25" "0.0%" "Governance")
@@ -557,7 +557,7 @@ $tApps = [ordered]@{
         # New governance measures
         (New-MeasureDef "Stale Apps (90d)" "CALCULATE(COUNTROWS('Apps'), 'Apps'[LastModifiedTime] < TODAY() - 90)")
         (New-MeasureDef "Stale App Rate" "DIVIDE([Stale Apps (90d)], [Total Apps], 0)" "0.0%")
-        (New-MeasureDef "Orphaned Apps" "CALCULATE(COUNTROWS('Apps'), ISBLANK('Apps'[OwnerEmail]))")
+        (New-MeasureDef "Orphaned Apps" "CALCULATE(COUNTROWS('Apps'), ISBLANK('Apps'[OwnerEmail]) || 'Apps'[OwnerEmail] = `"`") + 0")
         (New-MeasureDef "Shared Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[SharedUsersCount] > 0)")
         (New-MeasureDef "Widely Shared Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[SharedUsersCount] >= 10)")
         (New-MeasureDef "Bypass Consent Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[BypassConsent] = TRUE())")
@@ -641,7 +641,7 @@ $tConnectors = [ordered]@{
     measures = @(
         (New-MeasureDef "Total Connectors" "COUNTROWS('Connectors')")
         (New-MeasureDef "Custom Connectors" "CALCULATE(COUNTROWS('Connectors'), 'Connectors'[IsCustom] = TRUE())")
-        (New-MeasureDef "Premium Connectors" "CALCULATE(COUNTROWS('Connectors'), 'Connectors'[Tier] = `"Premium`")")
+        (New-MeasureDef "Premium Connectors" "CALCULATE(COUNTROWS('Connectors'), 'Connectors'[Tier] = `"Premium`") + 0")
         # New governance measures
         (New-MeasureDef "Standard Connectors" "CALCULATE(COUNTROWS('Connectors'), 'Connectors'[Tier] = `"Standard`")")
         (New-MeasureDef "Unique Connector Types" "DISTINCTCOUNT('Connectors'[DisplayName])")
@@ -692,8 +692,8 @@ $tDlpRules = [ordered]@{
     )))
     measures = @(
         (New-MeasureDef "Total Connector Rules" "COUNTROWS('DlpConnectorRules')" "#,##0" "DLP")
-        (New-MeasureDef "Business Connectors" "CALCULATE(COUNTROWS('DlpConnectorRules'), 'DlpConnectorRules'[Classification] = `"Business`")" "#,##0" "DLP")
-        (New-MeasureDef "Non-Business Connectors" "CALCULATE(COUNTROWS('DlpConnectorRules'), 'DlpConnectorRules'[Classification] = `"NonBusiness`")" "#,##0" "DLP")
+        (New-MeasureDef "Business Connectors" "CALCULATE(COUNTROWS('DlpConnectorRules'), 'DlpConnectorRules'[Classification] = `"Business`") + 0" "#,##0" "DLP")
+        (New-MeasureDef "Non-Business Connectors" "CALCULATE(COUNTROWS('DlpConnectorRules'), 'DlpConnectorRules'[Classification] = `"NonBusiness`") + 0" "#,##0" "DLP")
         (New-MeasureDef "Blocked Connectors" "CALCULATE(COUNTROWS('DlpConnectorRules'), 'DlpConnectorRules'[Classification] = `"Blocked`")" "#,##0" "DLP")
         (New-MeasureDef "Blocked Connector Rate" "DIVIDE([Blocked Connectors], COUNTROWS('DlpConnectorRules'), 0)" "0.0%" "DLP")
     )
@@ -741,7 +741,7 @@ $tAppConnRefs = [ordered]@{
     measures = @(
         (New-MeasureDef "Total Connector References" "COUNTROWS('AppConnectorRefs')")
         (New-MeasureDef "Distinct App Endpoints" "DISTINCTCOUNT('AppConnectorRefs'[EndpointUrl])")
-        (New-MeasureDef "App Refs with Endpoints" "CALCULATE(COUNTROWS('AppConnectorRefs'), NOT(ISBLANK('AppConnectorRefs'[EndpointUrl])))")
+        (New-MeasureDef "App Refs with Endpoints" "CALCULATE(COUNTROWS('AppConnectorRefs'), NOT(ISBLANK('AppConnectorRefs'[EndpointUrl])) && 'AppConnectorRefs'[EndpointUrl] <> `"`") + 0")
     )
 }
 
@@ -766,7 +766,7 @@ $tFlowActions = [ordered]@{
     measures = @(
         (New-MeasureDef "Total Flow Actions" "COUNTROWS('FlowActions')")
         (New-MeasureDef "Distinct Action Endpoints" "DISTINCTCOUNT('FlowActions'[EndpointUrl])")
-        (New-MeasureDef "Actions with Endpoints" "CALCULATE(COUNTROWS('FlowActions'), NOT(ISBLANK('FlowActions'[EndpointUrl])))")
+        (New-MeasureDef "Actions with Endpoints" "CALCULATE(COUNTROWS('FlowActions'), NOT(ISBLANK('FlowActions'[EndpointUrl])) && 'FlowActions'[EndpointUrl] <> `"`") + 0")
     )
 }
 
@@ -913,10 +913,10 @@ $absReportJson = Join-Path (Resolve-Path $reportDir2).Path "report.json"
 [System.IO.File]::WriteAllText($absReportJson, $reportJsonContent, [System.Text.UTF8Encoding]::new($false))
 
 # ============================================================================
-# 8 GOVERNANCE PAGES
+# 12 PAGES (8 governance + 4 detail)
 # ============================================================================
 
-$pageNames = @("executive", "environments", "apps", "flows", "connectors", "dlp", "endpoints", "lifecycle")
+$pageNames = @("executive", "environments", "apps", "flows", "connectors", "dlp", "endpoints", "lifecycle", "app-details", "flow-details", "env-details", "dlp-details")
 Write-JsonFile "$defDir/pages/pages.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.0.0/schema.json"
     pageOrder = $pageNames
@@ -1051,6 +1051,49 @@ $pageDefs = @{
             (New-TableVisual "tblStaleApps" 20 380 880 320 4000 "Apps" @("DisplayName","AppType","OwnerDisplayName","EnvironmentName","LastModifiedTime") "Stale App Details")
         )
     }
+    # --- Detail Pages ---
+    "app-details" = @{
+        displayName = "App Details"
+        visuals = @(
+            (New-SlicerVisual "slicerAppDetail" 20 20 170 80 50 "Apps" "DisplayName" "Select App")
+            (New-TableVisual "tblAppInfo" 20 120 880 280 1000 "Apps" @("DisplayName","AppType","Status","OwnerDisplayName","OwnerEmail","EnvironmentName","SharedUsersCount","SharedGroupsCount","UsesPremiumApi","UsesCustomApi","IsSolutionAware","BypassConsent","CreatedTime","LastModifiedTime") "App Info")
+            (New-TableVisual "tblAppConnectors" 20 420 880 280 2000 "AppConnectorRefs" @("DisplayName","ConnectorId","EndpointUrl","DataSources") "App Connectors")
+        )
+    }
+    "flow-details" = @{
+        displayName = "Flow Details"
+        visuals = @(
+            (New-SlicerVisual "slicerFlowDetail" 20 20 170 80 50 "Flows" "DisplayName" "Select Flow")
+            (New-TableVisual "tblFlowInfo" 20 120 880 200 1000 "Flows" @("DisplayName","State","CreatorDisplayName","TriggerType","EnvironmentName","IsSolutionAware","IsManaged","SuspensionReason","CreatedTime","LastModifiedTime") "Flow Info")
+            (New-TableVisual "tblFlowActions" 20 340 880 180 2000 "FlowActions" @("Name","ActionType","ConnectorId","EndpointUrl","OperationId") "Flow Actions")
+            (New-TableVisual "tblFlowTriggers" 20 535 880 180 3000 "FlowTriggers" @("Name","TriggerType","ConnectorId","EndpointUrl","OperationId") "Flow Triggers")
+        )
+    }
+    "env-details" = @{
+        displayName = "Environment Details"
+        visuals = @(
+            (New-SlicerVisual "slicerEnvDetail" 20 20 170 80 50 "Environments" "DisplayName" "Select Environment")
+            (New-CardVisual "cardEnvDetApps" 210 20 120 80 100 "Apps" "Total Apps" "Apps")
+            (New-CardVisual "cardEnvDetFlows" 345 20 120 80 200 "Flows" "Total Flows" "Flows")
+            (New-CardVisual "cardEnvDetConn" 480 20 120 80 300 "Connectors" "Total Connectors" "Connectors")
+            (New-CardVisual "cardEnvDetUnsec" 615 20 120 80 400 "Environments" "Unsecured Environments" "Unsecured")
+            (New-CardVisual "cardEnvDetCap" 750 20 120 80 500 "Environments" "Total Capacity GB" "Capacity GB")
+            (New-TableVisual "tblEnvInfo" 20 120 880 200 1000 "Environments" @("DisplayName","EnvironmentType","Region","State","IsDefault","IsDataverseEnabled","SecurityGroupId","DatabaseUsedMb","FileUsedMb","LogUsedMb","CreatedTime","LastModifiedTime") "Environment Info")
+            (New-TableVisual "tblEnvApps" 20 340 430 360 2000 "Apps" @("DisplayName","AppType","OwnerDisplayName","Status") "Environment Apps")
+            (New-TableVisual "tblEnvFlows" 470 340 430 360 3000 "Flows" @("DisplayName","State","TriggerType","CreatorDisplayName") "Environment Flows")
+        )
+    }
+    "dlp-details" = @{
+        displayName = "DLP Policy Details"
+        visuals = @(
+            (New-SlicerVisual "slicerDlpDetail" 20 20 170 80 50 "DlpPolicies" "DisplayName" "Select Policy")
+            (New-CardVisual "cardDlpDetRules" 210 20 120 80 100 "DlpConnectorRules" "Total Connector Rules" "Rules")
+            (New-CardVisual "cardDlpDetBiz" 345 20 120 80 200 "DlpConnectorRules" "Business Connectors" "Business")
+            (New-CardVisual "cardDlpDetBlocked" 480 20 120 80 300 "DlpConnectorRules" "Blocked Connectors" "Blocked")
+            (New-TableVisual "tblDlpInfo" 20 120 880 200 1000 "DlpPolicies" @("DisplayName","IsEnabled","PolicyType","EnvironmentScope","CreatedTime","LastModifiedTime") "Policy Info")
+            (New-TableVisual "tblDlpConnRules" 20 340 880 360 2000 "DlpConnectorRules" @("ConnectorName","Classification","PolicyName") "Connector Rules")
+        )
+    }
 }
 
 # --- Generate page files ---
@@ -1092,7 +1135,7 @@ Write-Host "     File > Options > Preview features > Power BI Project (.pbip)" -
 Write-Host "  2. Open: $OutputPath/$projectName.pbip" -ForegroundColor Gray
 Write-Host "  3. If CSVs move, update the CsvFolderPath parameter in Transform Data" -ForegroundColor Gray
 Write-Host ""
-Write-Host "8 Governance Pages:" -ForegroundColor Yellow
+Write-Host "12 Pages (8 governance + 4 detail):" -ForegroundColor Yellow
 Write-Host "  1. Executive Summary  — governance score, KPI gauges, environment treemap" -ForegroundColor Gray
 Write-Host "  2. Environment Gov.   — security posture, capacity, type distribution" -ForegroundColor Gray
 Write-Host "  3. App Inventory/Risk — staleness, orphans, sharing risk, bypass consent" -ForegroundColor Gray
@@ -1101,6 +1144,10 @@ Write-Host "  5. Connector Risk     — tier exposure, premium cost, top connect
 Write-Host "  6. DLP & Compliance   — policy coverage, classification, blocked connectors" -ForegroundColor Gray
 Write-Host "  7. Endpoint/API Risk  — connector endpoints, flow action URLs, connection targets" -ForegroundColor Gray
 Write-Host "  8. Shadow IT/Lifecycle— stale assets, unmanaged flows, top creators" -ForegroundColor Gray
+Write-Host "  9. App Details        — select app, view all properties + connectors" -ForegroundColor Gray
+Write-Host " 10. Flow Details       — select flow, view info + actions + triggers" -ForegroundColor Gray
+Write-Host " 11. Environment Details— select env, view info + apps + flows" -ForegroundColor Gray
+Write-Host " 12. DLP Policy Details — select policy, view info + connector rules" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Key Governance Measures:" -ForegroundColor Yellow
 Write-Host "  - Governance Score (weighted composite of security, suspension, staleness, DLP)" -ForegroundColor Gray
