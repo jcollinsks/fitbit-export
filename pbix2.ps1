@@ -2,7 +2,7 @@
 .SYNOPSIS
     Generates an Enterprise Governance Power BI Dashboard (PBIP) from Power Platform CSV exports.
 .DESCRIPTION
-    Creates a 7-page governance-focused PBIP project with:
+    Creates an 8-page governance-focused PBIP project with:
     - ~60 DAX measures (risk scores, staleness, trends, ratios)
     - Visual types: card, donut, bar, lineChart, treemap, gauge, slicer, columnChart, matrix, table
     - Environment slicer filtering on key pages
@@ -10,7 +10,7 @@
 
     Pages: Executive Summary, Environment Governance, App Inventory & Risk,
            Flow Health & Operations, Connector Risk Analysis, DLP & Compliance,
-           Shadow IT & Lifecycle
+           Endpoint & API Risk, Shadow IT & Lifecycle
 
     Open the generated .pbip file in Power BI Desktop (Developer Mode enabled).
 .PARAMETER CsvPath
@@ -740,6 +740,8 @@ $tAppConnRefs = [ordered]@{
     )))
     measures = @(
         (New-MeasureDef "Total Connector References" "COUNTROWS('AppConnectorRefs')")
+        (New-MeasureDef "Distinct App Endpoints" "DISTINCTCOUNT('AppConnectorRefs'[EndpointUrl])")
+        (New-MeasureDef "App Refs with Endpoints" "CALCULATE(COUNTROWS('AppConnectorRefs'), NOT(ISBLANK('AppConnectorRefs'[EndpointUrl])))")
     )
 }
 
@@ -763,6 +765,8 @@ $tFlowActions = [ordered]@{
     )))
     measures = @(
         (New-MeasureDef "Total Flow Actions" "COUNTROWS('FlowActions')")
+        (New-MeasureDef "Distinct Action Endpoints" "DISTINCTCOUNT('FlowActions'[EndpointUrl])")
+        (New-MeasureDef "Actions with Endpoints" "CALCULATE(COUNTROWS('FlowActions'), NOT(ISBLANK('FlowActions'[EndpointUrl])))")
     )
 }
 
@@ -786,6 +790,7 @@ $tFlowTriggers = [ordered]@{
     )))
     measures = @(
         (New-MeasureDef "Total Flow Triggers" "COUNTROWS('FlowTriggers')")
+        (New-MeasureDef "Distinct Trigger Endpoints" "DISTINCTCOUNT('FlowTriggers'[EndpointUrl])")
     )
 }
 
@@ -805,6 +810,7 @@ $tFlowConnRefs = [ordered]@{
     )))
     measures = @(
         (New-MeasureDef "Total Flow Connections" "COUNTROWS('FlowConnectionRefs')")
+        (New-MeasureDef "Distinct Connection URLs" "DISTINCTCOUNT('FlowConnectionRefs'[ConnectionUrl])")
     )
 }
 
@@ -907,10 +913,10 @@ $absReportJson = Join-Path (Resolve-Path $reportDir2).Path "report.json"
 [System.IO.File]::WriteAllText($absReportJson, $reportJsonContent, [System.Text.UTF8Encoding]::new($false))
 
 # ============================================================================
-# 7 GOVERNANCE PAGES
+# 8 GOVERNANCE PAGES
 # ============================================================================
 
-$pageNames = @("executive", "environments", "apps", "flows", "connectors", "dlp", "lifecycle")
+$pageNames = @("executive", "environments", "apps", "flows", "connectors", "dlp", "endpoints", "lifecycle")
 Write-JsonFile "$defDir/pages/pages.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.0.0/schema.json"
     pageOrder = $pageNames
@@ -1015,6 +1021,21 @@ $pageDefs = @{
             (New-TableVisual "tblDlpRules2" 20 545 880 165 4000 "DlpConnectorRules" @("PolicyName","ConnectorName","Classification") "Connector Rules")
         )
     }
+    endpoints = @{
+        displayName = "Endpoint & API Risk"
+        visuals = @(
+            (New-SlicerVisual "slicerEnvEndpt" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
+            (New-CardVisual "cardEndptConnRefs" 210 20 120 80 100 "AppConnectorRefs" "Total Connector References" "Connector Refs")
+            (New-CardVisual "cardEndptDistApp" 345 20 120 80 200 "AppConnectorRefs" "Distinct App Endpoints" "App Endpoints")
+            (New-CardVisual "cardEndptActions" 480 20 120 80 300 "FlowActions" "Total Flow Actions" "Flow Actions")
+            (New-CardVisual "cardEndptDistAct" 615 20 120 80 400 "FlowActions" "Distinct Action Endpoints" "Action Endpoints")
+            (New-CardVisual "cardEndptDistConn" 750 20 120 80 500 "FlowConnectionRefs" "Distinct Connection URLs" "Connection URLs")
+            (New-BarChartVisual "barTopConnectors" 20 120 430 240 1000 "AppConnectorRefs" "DisplayName" "Total Connector References" "Top Connectors")
+            (New-TreemapVisual "tmActionTypes" 470 120 430 240 2000 "FlowActions" "ActionType" "FlowActions" "Total Flow Actions" "Action Types")
+            (New-TableVisual "tblAppEndpoints" 20 380 880 160 3000 "AppConnectorRefs" @("DisplayName","ConnectorId","EndpointUrl","DataSources") "App Endpoint Details")
+            (New-TableVisual "tblFlowEndpoints" 20 555 880 160 4000 "FlowActions" @("Name","ActionType","ConnectorId","EndpointUrl","OperationId") "Flow Endpoint Details")
+        )
+    }
     lifecycle = @{
         displayName = "Shadow IT & Lifecycle"
         visuals = @(
@@ -1071,14 +1092,15 @@ Write-Host "     File > Options > Preview features > Power BI Project (.pbip)" -
 Write-Host "  2. Open: $OutputPath/$projectName.pbip" -ForegroundColor Gray
 Write-Host "  3. If CSVs move, update the CsvFolderPath parameter in Transform Data" -ForegroundColor Gray
 Write-Host ""
-Write-Host "7 Governance Pages:" -ForegroundColor Yellow
+Write-Host "8 Governance Pages:" -ForegroundColor Yellow
 Write-Host "  1. Executive Summary  — governance score, KPI gauges, environment treemap" -ForegroundColor Gray
 Write-Host "  2. Environment Gov.   — security posture, capacity, type distribution" -ForegroundColor Gray
 Write-Host "  3. App Inventory/Risk — staleness, orphans, sharing risk, bypass consent" -ForegroundColor Gray
 Write-Host "  4. Flow Health        — suspension analysis, trigger patterns, reliability" -ForegroundColor Gray
 Write-Host "  5. Connector Risk     — tier exposure, premium cost, top connectors treemap" -ForegroundColor Gray
 Write-Host "  6. DLP & Compliance   — policy coverage, classification, blocked connectors" -ForegroundColor Gray
-Write-Host "  7. Shadow IT/Lifecycle— stale assets, unmanaged flows, top creators" -ForegroundColor Gray
+Write-Host "  7. Endpoint/API Risk  — connector endpoints, flow action URLs, connection targets" -ForegroundColor Gray
+Write-Host "  8. Shadow IT/Lifecycle— stale assets, unmanaged flows, top creators" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Key Governance Measures:" -ForegroundColor Yellow
 Write-Host "  - Governance Score (weighted composite of security, suspension, staleness, DLP)" -ForegroundColor Gray
