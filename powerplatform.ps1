@@ -613,6 +613,61 @@ foreach ($env in $environments) {
                 }
             }
 
+            # --- Helper: try to extract a URL string from an arbitrary value ---
+            function Get-UrlString {
+                param($Value)
+                if ($null -eq $Value) { return $null }
+                if ($Value -is [string]) {
+                    if ($Value -match '^https?://') { return $Value }
+                    return $null
+                }
+                # Object — stringify and check
+                if ($null -ne $Value.PSObject) {
+                    $s = "$Value"
+                    if ($s -match '^https?://' -and $s -notmatch '^System\.') { return $s }
+                }
+                return $null
+            }
+
+            # --- Helper: recursively scan an object for any property whose key or value looks like a URL ---
+            function Find-UrlInObject {
+                param($Obj, [int]$Depth = 0)
+                if ($Depth -gt 4 -or $null -eq $Obj) { return $null }
+                if ($Obj -is [string]) { if ($Obj -match '^https?://') { return $Obj }; return $null }
+                if ($Obj -is [int] -or $Obj -is [bool] -or $Obj -is [double]) { return $null }
+                if ($null -eq $Obj.PSObject) { return $null }
+                foreach ($p in $Obj.PSObject.Properties) {
+                    $k = $p.Name.ToLower()
+                    # Skip known non-URL properties to avoid false positives
+                    if ($k -in @('host','authentication','retryPolicy','metadata','trackedProperties','operationOptions','type','kind','runtimeConfiguration')) { continue }
+                    # Priority: keys that likely hold URLs
+                    if ($k -match 'uri$|url$|endpoint|baseurl|serviceurl|siteurl|dataset|server') {
+                        $v = Get-UrlString $p.Value
+                        if ($v) { return $v }
+                        # Might be non-URL but still useful (e.g. server name)
+                        if ($p.Value -is [string] -and $p.Value -ne '') {
+                            if ($k -match 'uri$|url$|endpoint|baseurl|serviceurl|siteurl') { return $p.Value }
+                            if ($k -eq 'dataset') { return $p.Value }
+                            if ($k -eq 'server') {
+                                $sv = $p.Value
+                                if ($Obj.PSObject.Properties.Name -contains 'database') { $sv = "$sv/$($Obj.database)" }
+                                if ($sv -and $sv -ne '/' -and $sv -ne '') { return $sv }
+                            }
+                        }
+                    }
+                }
+                # Second pass: recurse into sub-objects
+                foreach ($p in $Obj.PSObject.Properties) {
+                    $k = $p.Name.ToLower()
+                    if ($k -in @('host','authentication','retryPolicy','metadata','trackedProperties','runtimeConfiguration')) { continue }
+                    if ($p.Value -and $null -ne $p.Value.PSObject -and -not ($p.Value -is [string])) {
+                        $found = Find-UrlInObject $p.Value ($Depth + 1)
+                        if ($found) { return $found }
+                    }
+                }
+                return $null
+            }
+
             # --- Helper: extract endpoint URL from step input parameters ---
             # This is where the actual URLs live (SharePoint sites, SQL servers, HTTP endpoints)
             function Get-StepEndpointUrl {
@@ -622,64 +677,67 @@ foreach ($env in $environments) {
                 if ($Inputs -is [string] -or $Inputs -is [int] -or $Inputs -is [bool] -or
                     $null -eq $Inputs.PSObject) { return "" }
 
-                # --- HTTP connector: uri/url directly on inputs (shared_sendhttp, httpwebhook) ---
-                # Check this FIRST — HTTP actions have uri at the root level alongside method/headers.
-                # The value may be a string or an expression object; extract string if possible.
+                # --- Pass 1: check root-level uri/url (built-in Http action type) ---
                 foreach ($uriKey in @('uri','url')) {
                     if ($Inputs.PSObject.Properties.Name -contains $uriKey) {
-                        $raw = $Inputs.$uriKey
-                        if ($raw -is [string] -and $raw -ne '') { return $raw }
-                        # Expression object — try to get the literal value
-                        if ($raw -and $null -ne $raw.PSObject) {
-                            $s = "$raw"
-                            if ($s -and $s -ne '' -and $s -notmatch '^System\.') { return $s }
-                        }
+                        $v = Get-UrlString $Inputs.$uriKey
+                        if ($v) { return $v }
+                        # Even non-URL string (could be expression) — return it
+                        if ($Inputs.$uriKey -is [string] -and $Inputs.$uriKey -ne '') { return $Inputs.$uriKey }
                     }
                 }
 
+                # --- Pass 2: check parameters (ApiConnection connectors) ---
                 $params = $null
                 if ($Inputs.PSObject.Properties.Name -contains 'parameters') { $params = $Inputs.parameters }
-                if (-not $params) { return "" }
-                # params could also be a non-object (expression string)
-                if ($params -is [string] -or $null -eq $params.PSObject) { return "" }
-
-                # --- HTTP with Azure AD (Entra): uri inside parameters ---
-                foreach ($uriKey in @('uri','url')) {
-                    if ($params.PSObject.Properties.Name -contains $uriKey) {
-                        $raw = $params.$uriKey
-                        if ($raw -is [string] -and $raw -ne '') { return $raw }
-                        if ($raw -and $null -ne $raw.PSObject) {
-                            $s = "$raw"
-                            if ($s -and $s -ne '' -and $s -notmatch '^System\.') { return $s }
+                if ($params -and $null -ne $params.PSObject -and -not ($params -is [string])) {
+                    # Check exact keys first (uri, url)
+                    foreach ($uriKey in @('uri','url')) {
+                        if ($params.PSObject.Properties.Name -contains $uriKey) {
+                            $v = Get-UrlString $params.$uriKey
+                            if ($v) { return $v }
+                            if ($params.$uriKey -is [string] -and $params.$uriKey -ne '') { return $params.$uriKey }
                         }
                     }
-                }
-
-                # SharePoint: dataset = site URL
-                if ($params.PSObject.Properties.Name -contains 'dataset') {
-                    $v = "$($params.dataset)"
-                    if ($v -and $v -ne '') { return $v }
-                }
-                # SQL: server/database
-                if ($params.PSObject.Properties.Name -contains 'server') {
-                    $v = "$($params.server)"
-                    if ($params.PSObject.Properties.Name -contains 'database') { $v = "$v/$($params.database)" }
-                    if ($v -and $v -ne '' -and $v -ne '/') { return $v }
-                }
-                # Generic URL fields
-                foreach ($key in @('siteUrl','token:siteUrl','serviceUrl','baseUrl','endpoint','hostname','hostName')) {
-                    if ($params.PSObject.Properties.Name -contains $key) {
-                        $v = "$($params.$key)"
+                    # Check slash-prefixed keys (Power Automate convention: request/uri, request/url, etc.)
+                    foreach ($p in $params.PSObject.Properties) {
+                        if ($p.Name -match '/uri$|/url$|/endpoint$|/baseUrl$|/serviceUrl$') {
+                            $v = Get-UrlString $p.Value
+                            if ($v) { return $v }
+                            if ($p.Value -is [string] -and $p.Value -ne '') { return $p.Value }
+                        }
+                    }
+                    # SharePoint: dataset = site URL
+                    if ($params.PSObject.Properties.Name -contains 'dataset') {
+                        $v = "$($params.dataset)"
                         if ($v -and $v -ne '') { return $v }
                     }
+                    # SQL: server/database
+                    if ($params.PSObject.Properties.Name -contains 'server') {
+                        $v = "$($params.server)"
+                        if ($params.PSObject.Properties.Name -contains 'database') { $v = "$v/$($params.database)" }
+                        if ($v -and $v -ne '' -and $v -ne '/') { return $v }
+                    }
+                    # Generic URL fields (exact and slash-prefixed)
+                    foreach ($key in @('siteUrl','token:siteUrl','serviceUrl','baseUrl','endpoint','hostname','hostName')) {
+                        if ($params.PSObject.Properties.Name -contains $key) {
+                            $v = "$($params.$key)"
+                            if ($v -and $v -ne '') { return $v }
+                        }
+                    }
+                    # Dataverse: entity name as "resource"
+                    if ($params.PSObject.Properties.Name -contains 'entityName') {
+                        return "dataverse:$($params.entityName)"
+                    }
+                    if ($params.PSObject.Properties.Name -contains 'subscriptionRequest/entityname') {
+                        return "dataverse:$($params.'subscriptionRequest/entityname')"
+                    }
                 }
-                # Dataverse: entity name as "resource"
-                if ($params.PSObject.Properties.Name -contains 'entityName') {
-                    return "dataverse:$($params.entityName)"
-                }
-                if ($params.PSObject.Properties.Name -contains 'subscriptionRequest/entityname') {
-                    return "dataverse:$($params.'subscriptionRequest/entityname')"
-                }
+
+                # --- Pass 3: deep scan the entire inputs tree for any URL ---
+                $found = Find-UrlInObject $Inputs
+                if ($found) { return $found }
+
                 return ""
             }
 
@@ -721,26 +779,16 @@ foreach ($env in $environments) {
                     $hostInfo = Get-StepHostInfo $inputs
                     $epUrl = Get-StepEndpointUrl $inputs
 
-                    # Debug: dump HTTP connector inputs structure when endpoint is empty
+                    # Debug: dump HTTP connector inputs to file when endpoint is empty
                     if ($epUrl -eq '' -and $hostInfo.ConnectorId -match 'http|sendhttp|webcontents|httpwithazuread|httpwebhook') {
-                        Write-Host "      [DEBUG-HTTP] Flow=$FlowId Step=$stepName ConnectorId=$($hostInfo.ConnectorId) Type=$stepType" -ForegroundColor Magenta
-                        if ($inputs) {
-                            $inputProps = $inputs.PSObject.Properties.Name -join ', '
-                            Write-Host "        inputs keys: $inputProps" -ForegroundColor Magenta
-                            if ($inputs.PSObject.Properties.Name -contains 'parameters' -and $inputs.parameters -and $null -ne $inputs.parameters.PSObject) {
-                                $paramProps = $inputs.parameters.PSObject.Properties.Name -join ', '
-                                Write-Host "        parameters keys: $paramProps" -ForegroundColor Magenta
-                                # Dump first 200 chars of parameters JSON
-                                try {
-                                    $pJson = $inputs.parameters | ConvertTo-Json -Depth 3 -Compress
-                                    Write-Host "        parameters: $($pJson.Substring(0, [math]::Min(300, $pJson.Length)))" -ForegroundColor Magenta
-                                } catch {}
-                            }
-                            if ($inputs.PSObject.Properties.Name -contains 'uri') {
-                                Write-Host "        inputs.uri type=$($inputs.uri.GetType().Name) value='$($inputs.uri)'" -ForegroundColor Magenta
-                            }
-                        } else {
-                            Write-Host "        inputs is NULL" -ForegroundColor Magenta
+                        $debugFile = "$OutPath/_debug_http.log"
+                        $debugLine = "=== Flow=$FlowId Step=$stepName Connector=$($hostInfo.ConnectorId) Type=$stepType ==="
+                        Write-Host "      [DEBUG-HTTP] $stepName ($($hostInfo.ConnectorId)) — empty URL, see _debug_http.log" -ForegroundColor Magenta
+                        try {
+                            $inputJson = if ($inputs) { $inputs | ConvertTo-Json -Depth 10 } else { "NULL" }
+                            "$debugLine`n$inputJson`n" | Add-Content -Path $debugFile -Encoding UTF8
+                        } catch {
+                            "Failed to serialize: $($_.Exception.Message)" | Add-Content -Path $debugFile -Encoding UTF8
                         }
                     }
 
