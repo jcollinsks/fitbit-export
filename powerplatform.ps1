@@ -721,6 +721,29 @@ foreach ($env in $environments) {
                     $hostInfo = Get-StepHostInfo $inputs
                     $epUrl = Get-StepEndpointUrl $inputs
 
+                    # Debug: dump HTTP connector inputs structure when endpoint is empty
+                    if ($epUrl -eq '' -and $hostInfo.ConnectorId -match 'http|sendhttp|webcontents|httpwithazuread|httpwebhook') {
+                        Write-Host "      [DEBUG-HTTP] Flow=$FlowId Step=$stepName ConnectorId=$($hostInfo.ConnectorId) Type=$stepType" -ForegroundColor Magenta
+                        if ($inputs) {
+                            $inputProps = $inputs.PSObject.Properties.Name -join ', '
+                            Write-Host "        inputs keys: $inputProps" -ForegroundColor Magenta
+                            if ($inputs.PSObject.Properties.Name -contains 'parameters' -and $inputs.parameters -and $null -ne $inputs.parameters.PSObject) {
+                                $paramProps = $inputs.parameters.PSObject.Properties.Name -join ', '
+                                Write-Host "        parameters keys: $paramProps" -ForegroundColor Magenta
+                                # Dump first 200 chars of parameters JSON
+                                try {
+                                    $pJson = $inputs.parameters | ConvertTo-Json -Depth 3 -Compress
+                                    Write-Host "        parameters: $($pJson.Substring(0, [math]::Min(300, $pJson.Length)))" -ForegroundColor Magenta
+                                } catch {}
+                            }
+                            if ($inputs.PSObject.Properties.Name -contains 'uri') {
+                                Write-Host "        inputs.uri type=$($inputs.uri.GetType().Name) value='$($inputs.uri)'" -ForegroundColor Magenta
+                            }
+                        } else {
+                            Write-Host "        inputs is NULL" -ForegroundColor Magenta
+                        }
+                    }
+
                     Append-CsvRow "$OutPath/FlowActions.csv" ([PSCustomObject]@{
                         FlowId=$FlowId; EnvironmentId=$EnvId; Position=$Pos.Value; Name=$stepName
                         ActionType=$stepType; ConnectorId=$hostInfo.ConnectorId
