@@ -425,111 +425,8 @@ foreach ($env in $environments) {
         Write-Host " Warning (connectors): $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 
-    # --- CONNECTIONS (fetch base URLs for HTTP connectors) ---
-    $connBaseUrls = @{}  # connectionName -> baseUrl
-    $debugConnFile = "$OutputPath/_debug_connections.log"
-    try {
-        Write-Host " Connections..." -ForegroundColor DarkGray -NoNewline
-        $token = Get-PPToken
-        $connUri = "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/connections?$apiVer"
-        $connections = Invoke-PPApiPaged -Uri $connUri -Token $token
-        if (-not $connections) { $connections = @() }
-
-        "=== Environment: $envId ($($env.DisplayName)) — $($connections.Count) connections ===" | Add-Content -Path $debugConnFile -Encoding UTF8
-        "API URL: $connUri`n" | Add-Content -Path $debugConnFile -Encoding UTF8
-
-        # Dump first 5 connections (any type) so we can see the structure
-        $dumped = 0
-        foreach ($conn in $connections) {
-            if ($dumped -lt 5) {
-                try {
-                    $connJson = $conn | ConvertTo-Json -Depth 8 -Compress
-                    # Truncate very large connections
-                    if ($connJson.Length -gt 3000) { $connJson = $connJson.Substring(0, 3000) + "...(truncated)" }
-                    "--- Connection #$($dumped+1): name=$($conn.name) ---`n$connJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
-                } catch {}
-                $dumped++
-            }
-
-            $connName = $conn.name
-            $connApiId = ""
-            # Try multiple paths to find the API identifier
-            if ($conn.PSObject.Properties.Name -contains 'id') {
-                $connApiId = "$($conn.id)" -replace '.*/apis/', '' -replace '/connections/.*', ''
-            }
-            if (-not $connApiId -and $conn.properties -and $conn.properties.PSObject.Properties.Name -contains 'apiId') {
-                $connApiId = "$($conn.properties.apiId)" -replace '.*/apis/', ''
-            }
-
-            $baseUrl = ""
-            $props = $conn.properties
-            if ($props -and $null -ne $props.PSObject) {
-                # Scan connectionParameters values for URLs
-                if ($props.PSObject.Properties.Name -contains 'connectionParameters') {
-                    $cp = $props.connectionParameters
-                    if ($cp -and $null -ne $cp.PSObject -and -not ($cp -is [string])) {
-                        foreach ($p in $cp.PSObject.Properties) {
-                            $v = "$($p.Value)"
-                            if ($v -match '^https?://') { $baseUrl = $v; break }
-                        }
-                    }
-                }
-                # Scan connectionParametersSet
-                if ($baseUrl -eq '' -and $props.PSObject.Properties.Name -contains 'connectionParametersSet') {
-                    $cps = $props.connectionParametersSet
-                    if ($cps -and $null -ne $cps.PSObject) {
-                        $found = Find-UrlInObject $cps
-                        if ($found) { $baseUrl = $found }
-                    }
-                }
-                # Scan statuses for target URLs
-                if ($baseUrl -eq '' -and $props.PSObject.Properties.Name -contains 'statuses') {
-                    foreach ($st in $props.statuses) {
-                        if ($null -eq $st -or $null -eq $st.PSObject) { continue }
-                        if ($st.PSObject.Properties.Name -contains 'target') {
-                            $v = "$($st.target)"
-                            if ($v -match '^https?://') { $baseUrl = $v; break }
-                        }
-                    }
-                }
-                # Deep scan entire properties as last resort
-                if ($baseUrl -eq '') {
-                    $found = Find-UrlInObject $props
-                    if ($found) { $baseUrl = $found }
-                }
-            }
-
-            if ($connName -and $baseUrl -ne '') {
-                $connBaseUrls[$connName] = $baseUrl
-            }
-
-            # Log HTTP connections with full detail
-            if ($connApiId -match 'http|sendhttp|webcontents|httpwithazuread|httpwebhook') {
-                try {
-                    $fullJson = $conn | ConvertTo-Json -Depth 10
-                    "`n=== HTTP Connection: name=$connName apiId=$connApiId baseUrl=$baseUrl ===`n$fullJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
-                } catch {
-                    "=== HTTP Connection: name=$connName apiId=$connApiId — serialize failed ===" | Add-Content -Path $debugConnFile -Encoding UTF8
-                }
-            }
-        }
-
-        # Summary
-        $summary = "SUMMARY: $($connections.Count) connections, $($connBaseUrls.Count) with base URLs"
-        $summary | Add-Content -Path $debugConnFile -Encoding UTF8
-        if ($connBaseUrls.Count -gt 0) {
-            foreach ($k in $connBaseUrls.Keys) {
-                "  $k => $($connBaseUrls[$k])" | Add-Content -Path $debugConnFile -Encoding UTF8
-            }
-        }
-
-        Write-Host " $($connections.Count) total, $($connBaseUrls.Count) with base URLs" -ForegroundColor DarkGray -NoNewline
-    }
-    catch {
-        "ERROR fetching connections: $($_.Exception.Message)" | Add-Content -Path $debugConnFile -Encoding UTF8
-        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Connections"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
-        Write-Host " Warning (connections): $($_.Exception.Message)" -ForegroundColor DarkYellow
-    }
+    # --- CONNECTION BASE URLs (extracted from flow connectionReferences below) ---
+    $connBaseUrls = @{}  # connectionName -> baseUrl (populated per-flow from connectionReferences)
 
     # --- TIMEOUT CHECK ---
     if (((Get-Date) - $envStartTime).TotalMinutes -gt $envTimeoutMin) {
@@ -936,7 +833,7 @@ foreach ($env in $environments) {
                 }
             }
 
-            # --- Write FlowConnectionRefs from connectionReferences ---
+            # --- Write FlowConnectionRefs and extract base URLs from connectionReferences ---
             if ($connRefs) {
                 foreach ($ref in $connRefs.PSObject.Properties) {
                     $crConnId = if ($ref.Value.PSObject.Properties.Name -contains 'id') { $ref.Value.id -replace '.*/apis/', '' }
@@ -945,11 +842,63 @@ foreach ($env in $environments) {
                     $crConnName = if ($ref.Value.PSObject.Properties.Name -contains 'connectionName') { $ref.Value.connectionName }
                                   else { "" }
 
-                    $crBaseUrl = if ($crConnName -and $connBaseUrls.ContainsKey($crConnName)) { $connBaseUrls[$crConnName] } else { "" }
+                    # Extract base URL from connectionReference properties
+                    # The flow detail response may include connectionProperties, swagger, etc.
+                    $crBaseUrl = ""
+                    if ($crConnName -and $connBaseUrls.ContainsKey($crConnName)) {
+                        $crBaseUrl = $connBaseUrls[$crConnName]
+                    } else {
+                        # Deep scan this connection reference for any URL
+                        $refVal = $ref.Value
+                        if ($refVal -and $null -ne $refVal.PSObject) {
+                            # Check connectionProperties (contains token:ResourceUri, baseUrl, etc.)
+                            if ($refVal.PSObject.Properties.Name -contains 'connectionProperties') {
+                                $cp = $refVal.connectionProperties
+                                if ($cp -and $null -ne $cp.PSObject -and -not ($cp -is [string])) {
+                                    foreach ($p in $cp.PSObject.Properties) {
+                                        $v = "$($p.Value)"
+                                        if ($v -match '^https?://') { $crBaseUrl = $v; break }
+                                    }
+                                }
+                            }
+                            # Check swagger.host
+                            if ($crBaseUrl -eq '' -and $refVal.PSObject.Properties.Name -contains 'swagger') {
+                                $sw = $refVal.swagger
+                                if ($sw -and $null -ne $sw.PSObject -and $sw.PSObject.Properties.Name -contains 'host') {
+                                    $h = "$($sw.host)"
+                                    if ($h -and $h -ne '') {
+                                        $scheme = if ($sw.PSObject.Properties.Name -contains 'schemes' -and $sw.schemes) { "$($sw.schemes[0])" } else { "https" }
+                                        $crBaseUrl = "${scheme}://${h}"
+                                    }
+                                }
+                            }
+                            # Deep scan as last resort
+                            if ($crBaseUrl -eq '') {
+                                $found = Find-UrlInObject $refVal
+                                if ($found) { $crBaseUrl = $found }
+                            }
+                        }
+                        # Cache for other flows using the same connection
+                        if ($crConnName -and $crBaseUrl -ne '') {
+                            $connBaseUrls[$crConnName] = $crBaseUrl
+                        }
+                    }
+
                     Append-CsvRow "$OutputPath/FlowConnectionRefs.csv" ([PSCustomObject]@{
                         FlowId=$f.name; EnvironmentId=$envId; ConnectorId=$crConnId; ConnectionName=$crConnName; ConnectionUrl=$crBaseUrl
                     })
                     $totalFlowConnRefs++
+
+                    # Debug: dump HTTP connection references to file
+                    if ($crConnId -match 'http|sendhttp|webcontents|httpwithazuread|httpwebhook') {
+                        $debugConnFile = "$OutputPath/_debug_connrefs.log"
+                        try {
+                            $refJson = $ref.Value | ConvertTo-Json -Depth 10
+                            "=== Flow=$($f.name) RefName=$($ref.Name) ConnId=$crConnId ConnName=$crConnName BaseUrl=$crBaseUrl ===`n$refJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
+                        } catch {
+                            "=== Flow=$($f.name) RefName=$($ref.Name) — serialize failed ===" | Add-Content -Path $debugConnFile -Encoding UTF8
+                        }
+                    }
                 }
             }
 

@@ -508,7 +508,7 @@ $tEnvironments = [ordered]@{
 $tApps = [ordered]@{
     name = "Apps"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "AppId")
+        (New-ColumnDef "AppId" "string" "none" -IsKey $true)
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
         (New-ColumnDef "DisplayName")
@@ -569,7 +569,7 @@ $tApps = [ordered]@{
 $tFlows = [ordered]@{
     name = "Flows"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "FlowId")
+        (New-ColumnDef "FlowId" "string" "none" -IsKey $true)
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
         (New-ColumnDef "DisplayName")
@@ -844,6 +844,10 @@ $modelBim = [ordered]@{
             (New-RelationshipDef "rel_Connectors_Env" "Connectors" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_DlpRules_Policy" "DlpConnectorRules" "PolicyId" "DlpPolicies" "PolicyId")
             (New-RelationshipDef "rel_Usage_Env" "UsageAnalytics" "EnvironmentId" "Environments" "EnvironmentId")
+            (New-RelationshipDef "rel_AppConnRefs_Apps" "AppConnectorRefs" "AppId" "Apps" "AppId")
+            (New-RelationshipDef "rel_FlowActions_Flows" "FlowActions" "FlowId" "Flows" "FlowId")
+            (New-RelationshipDef "rel_FlowTriggers_Flows" "FlowTriggers" "FlowId" "Flows" "FlowId")
+            (New-RelationshipDef "rel_FlowConnRefs_Flows" "FlowConnectionRefs" "FlowId" "Flows" "FlowId")
         )
         expressions = @(
             [ordered]@{
