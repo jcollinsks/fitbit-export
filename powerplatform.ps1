@@ -426,6 +426,10 @@ foreach ($env in $environments) {
     }
 
     # --- CONNECTION BASE URLs (fetch per-API for HTTP connector types) ---
+    # The admin endpoint (/scopes/admin/) returns ConnectionWithoutConnectionParameters
+    # which strips the connectionParameters property. We use a two-pass approach:
+    # 1. Admin endpoint to list all HTTP connections in the environment (all users)
+    # 2. Non-admin endpoint to fetch each connection individually (includes connectionParameters)
     $connBaseUrls = @{}  # connectionName -> baseUrl
     try {
         Write-Host " HTTP connections..." -ForegroundColor DarkGray -NoNewline
@@ -433,48 +437,98 @@ foreach ($env in $environments) {
         $httpApiIds = @("shared_sendhttp", "shared_webcontents", "shared_httpwithazuread", "shared_httpwebhook")
         $debugConnFile = "$OutputPath/_debug_connrefs.log"
         $totalHttpConns = 0
+
+        # Helper to extract base URL from connection properties
+        function Get-ConnectionBaseUrl {
+            param($props)
+            $baseUrl = ""
+            if (-not $props -or $null -eq $props.PSObject) { return "" }
+
+            # Check connectionParameters for base resource URL
+            if ($props.PSObject.Properties.Name -contains 'connectionParameters') {
+                $cp = $props.connectionParameters
+                if ($cp -and $null -ne $cp.PSObject -and -not ($cp -is [string])) {
+                    # First check for known parameter names
+                    foreach ($knownKey in @('baseResourceUrl', 'token:baseResourceUrl', 'baseUrl', 'resourceUrl')) {
+                        if ($cp.PSObject.Properties.Name -contains $knownKey) {
+                            $v = "$($cp.$knownKey)"
+                            if ($v -match '^https?://') { return $v }
+                        }
+                    }
+                    # Fallback: scan all properties for URL values
+                    foreach ($p in $cp.PSObject.Properties) {
+                        $v = "$($p.Value)"
+                        if ($v -match '^https?://' -and $v -notmatch '\.(png|jpg|svg|gif|ico)') {
+                            return $v
+                        }
+                    }
+                }
+            }
+
+            # Check connectionParametersSet.values for multi-auth connectors
+            if ($props.PSObject.Properties.Name -contains 'connectionParametersSet') {
+                $cps = $props.connectionParametersSet
+                if ($cps -and $null -ne $cps.PSObject) {
+                    # Check values property (multi-auth structure)
+                    if ($cps.PSObject.Properties.Name -contains 'values') {
+                        $vals = $cps.values
+                        if ($vals -and $null -ne $vals.PSObject) {
+                            foreach ($p in $vals.PSObject.Properties) {
+                                $v = "$($p.Value)"
+                                if ($v -match '^https?://' -and $v -notmatch '\.(png|jpg|svg|gif|ico)') {
+                                    return $v
+                                }
+                            }
+                        }
+                    }
+                    # Check nested oAuthSettings.customParameters.resourceUri
+                    try {
+                        $resUri = $cps.values.token.oAuthSettings.customParameters.resourceUri.value
+                        if ($resUri -match '^https?://') { return $resUri }
+                    } catch {}
+                }
+            }
+
+            return ""
+        }
+
         foreach ($apiId in $httpApiIds) {
-            $connUri = "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis/$apiId/connections?$apiVer"
-            $apiConns = Invoke-PPApi -Uri $connUri -Token $token -TokenRefresh { Get-PPToken }
+            # Pass 1: Admin endpoint to list ALL connections (all users) in this env
+            $adminUri = "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis/$apiId/connections?$apiVer"
+            $apiConns = Invoke-PPApi -Uri $adminUri -Token $token -TokenRefresh { Get-PPToken }
             if (-not $apiConns -or -not $apiConns.value) { continue }
+
             foreach ($conn in $apiConns.value) {
                 $totalHttpConns++
                 $connName = $conn.name
                 $baseUrl = ""
-                $props = $conn.properties
-                if ($props -and $null -ne $props.PSObject) {
-                    # connectionParameters holds the configured base URL
-                    if ($props.PSObject.Properties.Name -contains 'connectionParameters') {
-                        $cp = $props.connectionParameters
-                        if ($cp -and $null -ne $cp.PSObject -and -not ($cp -is [string])) {
-                            foreach ($p in $cp.PSObject.Properties) {
-                                $v = "$($p.Value)"
-                                # Must be a real URL, not an icon/image
-                                if ($v -match '^https?://' -and $v -notmatch '\.(png|jpg|svg|gif|ico)') {
-                                    $baseUrl = $v; break
-                                }
-                            }
+
+                # Try extracting from admin response first (sometimes has partial data)
+                $baseUrl = Get-ConnectionBaseUrl $conn.properties
+
+                # Pass 2: If no base URL found, fetch individual connection via non-admin endpoint
+                # which includes full connectionParameters
+                if ($baseUrl -eq '' -and $connName) {
+                    try {
+                        $detailUri = "$pa/providers/Microsoft.PowerApps/apis/$apiId/connections/${connName}?$apiVer&`$filter=environment eq '$envId'"
+                        $detailConn = Invoke-PPApi -Uri $detailUri -Token $token -TokenRefresh { Get-PPToken }
+                        if ($detailConn -and $detailConn.properties) {
+                            $baseUrl = Get-ConnectionBaseUrl $detailConn.properties
+                            $conn = $detailConn  # use the detailed version for debug output
                         }
-                    }
-                    # Also check connectionParametersSet
-                    if ($baseUrl -eq '' -and $props.PSObject.Properties.Name -contains 'connectionParametersSet') {
-                        $cps = $props.connectionParametersSet
-                        if ($cps -and $null -ne $cps.PSObject) {
-                            foreach ($p in $cps.PSObject.Properties) {
-                                if ($p.Value -is [string] -and $p.Value -match '^https?://' -and $p.Value -notmatch '\.(png|jpg|svg|gif|ico)') {
-                                    $baseUrl = $p.Value; break
-                                }
-                            }
-                        }
+                    } catch {
+                        # Non-admin fetch may fail for other users' connections — that's OK
                     }
                 }
+
                 if ($connName -and $baseUrl -ne '') {
                     $connBaseUrls[$connName] = $baseUrl
                 }
+
                 # Debug: dump every HTTP connection
                 try {
-                    $cJson = $conn | ConvertTo-Json -Depth 8
-                    if ($cJson.Length -gt 5000) { $cJson = $cJson.Substring(0, 5000) + "...(truncated)" }
+                    $cJson = $conn | ConvertTo-Json -Depth 12
+                    if ($cJson.Length -gt 8000) { $cJson = $cJson.Substring(0, 8000) + "...(truncated)" }
                     "=== API=$apiId Connection=$connName BaseUrl=$baseUrl ===`n$cJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
                 } catch {}
             }
