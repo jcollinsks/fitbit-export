@@ -1,0 +1,6 @@
+FlowId,EnvironmentId,Position,Name,ActionType,ConnectorId,OperationId,EndpointUrl,BaseUrl
+flow-201,env-001,1,Get_Approval_Request,ApiConnection,shared_sharepointonline,GetItems,https://contoso.sharepoint.com/sites/approvals,
+flow-201,env-001,2,Send_Approval_Email,ApiConnection,shared_office365,SendEmail,https://graph.microsoft.com,
+flow-202,env-001,1,Query_Daily_Data,ApiConnection,shared_sql,ExecuteQuery,tcp:sql-contoso.database.windows.net,
+flow-202,env-001,2,Send_Report,ApiConnection,shared_office365,SendEmail,https://graph.microsoft.com,
+flow-203,env-002,1,Call_Test_API,ApiConnection,custom_contoso_api,GetData,https://api.contoso.com/v1/test,https://api.contoso.com

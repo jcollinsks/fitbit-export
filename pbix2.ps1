@@ -760,13 +760,15 @@ $tFlowActions = [ordered]@{
         (New-ColumnDef "ConnectorId")
         (New-ColumnDef "OperationId")
         (New-ColumnDef "EndpointUrl")
+        (New-ColumnDef "BaseUrl")
         (New-CalcColumnDef "HttpConnectorType" "SWITCH(TRUE(), CONTAINSSTRING('FlowActions'[ConnectorId], `"sendhttp`"), `"HTTP`", CONTAINSSTRING('FlowActions'[ConnectorId], `"webcontents`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowActions'[ConnectorId], `"httpwithazuread`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowActions'[ConnectorId], `"httpwebhook`"), `"HTTP Webhook`", BLANK())")
     )
     partitions = @((New-CsvPartition "FlowActions" @(
         @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
         @{Name="Position"; Type="Int64.Type"}, @{Name="Name"; Type="type text"},
         @{Name="ActionType"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
-        @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"}
+        @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"},
+        @{Name="BaseUrl"; Type="type text"}
     )))
     measures = @(
         (New-MeasureDef "Total Flow Actions" "COUNTROWS('FlowActions')")
@@ -789,13 +791,15 @@ $tFlowTriggers = [ordered]@{
         (New-ColumnDef "ConnectorId")
         (New-ColumnDef "OperationId")
         (New-ColumnDef "EndpointUrl")
+        (New-ColumnDef "BaseUrl")
         (New-CalcColumnDef "HttpConnectorType" "SWITCH(TRUE(), CONTAINSSTRING('FlowTriggers'[ConnectorId], `"sendhttp`"), `"HTTP`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"webcontents`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"httpwithazuread`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"httpwebhook`"), `"HTTP Webhook`", BLANK())")
     )
     partitions = @((New-CsvPartition "FlowTriggers" @(
         @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
         @{Name="Position"; Type="Int64.Type"}, @{Name="Name"; Type="type text"},
         @{Name="TriggerType"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
-        @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"}
+        @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"},
+        @{Name="BaseUrl"; Type="type text"}
     )))
     measures = @(
         (New-MeasureDef "Total Flow Triggers" "COUNTROWS('FlowTriggers')")
@@ -1043,7 +1047,7 @@ $pageDefs = @{
             (New-BarChartVisual "barTopConnectors" 20 120 430 240 1000 "AppConnectorRefs" "DisplayName" "Total Connector References" "Top Connectors")
             (New-TreemapVisual "tmActionTypes" 470 120 430 240 2000 "FlowActions" "ActionType" "FlowActions" "Total Flow Actions" "Action Types")
             (New-TableVisual "tblAppEndpoints" 20 380 880 160 3000 "AppConnectorRefs" @("DisplayName","ConnectorId","HttpConnectorType","EndpointUrl","DataSources") "App Endpoint Details")
-            (New-TableVisual "tblFlowEndpoints" 20 555 880 160 4000 "FlowActions" @("Name","ActionType","ConnectorId","HttpConnectorType","EndpointUrl","OperationId") "Flow Endpoint Details")
+            (New-TableVisual "tblFlowEndpoints" 20 555 880 160 4000 "FlowActions" @("Name","ActionType","ConnectorId","HttpConnectorType","BaseUrl","EndpointUrl","OperationId") "Flow Endpoint Details")
         )
     }
     lifecycle = @{
@@ -1075,8 +1079,8 @@ $pageDefs = @{
         visuals = @(
             (New-SlicerVisual "slicerFlowDetail" 20 20 170 80 50 "Flows" "DisplayName" "Select Flow")
             (New-TableVisual "tblFlowInfo" 20 120 880 200 1000 "Flows" @("DisplayName","State","CreatorDisplayName","TriggerType","EnvironmentName","IsSolutionAware","IsManaged","SuspensionReason","CreatedTime","LastModifiedTime") "Flow Info")
-            (New-TableVisual "tblFlowActions" 20 340 880 180 2000 "FlowActions" @("Name","ActionType","ConnectorId","EndpointUrl","OperationId") "Flow Actions")
-            (New-TableVisual "tblFlowTriggers" 20 535 880 180 3000 "FlowTriggers" @("Name","TriggerType","ConnectorId","EndpointUrl","OperationId") "Flow Triggers")
+            (New-TableVisual "tblFlowActions" 20 340 880 180 2000 "FlowActions" @("Name","ActionType","ConnectorId","BaseUrl","EndpointUrl","OperationId") "Flow Actions")
+            (New-TableVisual "tblFlowTriggers" 20 535 880 180 3000 "FlowTriggers" @("Name","TriggerType","ConnectorId","BaseUrl","EndpointUrl","OperationId") "Flow Triggers")
         )
     }
     "env-details" = @{

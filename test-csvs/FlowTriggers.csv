@@ -1,0 +1,4 @@
+FlowId,EnvironmentId,Position,Name,TriggerType,ConnectorId,OperationId,EndpointUrl,BaseUrl
+flow-201,env-001,0,When_Item_Created,Automated,shared_sharepointonline,OnNewItem,https://contoso.sharepoint.com/sites/approvals,
+flow-202,env-001,0,Recurrence,Schedule,,,,
+flow-203,env-002,0,When_HTTP_Request,Automated,custom_contoso_api,OnWebhook,https://api.contoso.com/v1/webhook,https://api.contoso.com
