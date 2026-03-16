@@ -35,6 +35,9 @@
     Collect data for a single environment only (by EnvironmentId). Useful for
     testing or quick runs. Get the ID from the Power Platform admin center URL
     or from a previous Environments.csv export.
+.PARAMETER UseDeviceCode
+    Use device code authentication instead of interactive browser login.
+    Default is interactive browser (works in most corporate environments).
 .PARAMETER Resume
     Resume a previous interrupted run. Skips environments already processed
     (tracked in _checkpoint.txt) and appends to existing CSVs instead of overwriting.
@@ -54,6 +57,7 @@ param(
     [string]$EnvironmentId = "",
     [switch]$IncludePermissions,
     [switch]$IncludeFlowDefinitions,
+    [switch]$UseDeviceCode,
     [switch]$Resume,
     [int]$MaxFlowDefinitions = 0,
     [int]$ThrottleLimit = 10
@@ -66,12 +70,14 @@ $ErrorActionPreference = "Stop"
 # ============================================================================
 
 Write-Host "Connecting to Azure..." -ForegroundColor Cyan
+$script:connectArgs = @{}
+if ($UseDeviceCode) { $script:connectArgs['UseDeviceAuthentication'] = $true }
 try {
-    Connect-AzAccount -UseDeviceAuthentication | Out-Null
+    Connect-AzAccount @script:connectArgs | Out-Null
 }
 catch {
-    Write-Host "  Device auth failed, trying interactive browser..." -ForegroundColor DarkYellow
-    Connect-AzAccount | Out-Null
+    Write-Host "  Auth failed ($($_.Exception.Message)), retrying..." -ForegroundColor DarkYellow
+    Connect-AzAccount @script:connectArgs | Out-Null
 }
 
 $script:ppToken = $null
@@ -95,7 +101,7 @@ function Get-PPToken {
     }
     catch {
         Write-Host "  [Auth] Session expired — re-authenticating..." -ForegroundColor Yellow
-        Connect-AzAccount -UseDeviceAuthentication | Out-Null
+        Connect-AzAccount @script:connectArgs | Out-Null
         $result = Get-AzAccessToken -ResourceUrl "https://service.powerapps.com/" -AsSecureString
     }
     $script:ppToken = Get-TokenString $result.Token
@@ -111,7 +117,7 @@ function Get-FlowToken {
     }
     catch {
         Write-Host "  [Auth] Session expired — re-authenticating..." -ForegroundColor Yellow
-        Connect-AzAccount -UseDeviceAuthentication | Out-Null
+        Connect-AzAccount @script:connectArgs | Out-Null
         $result = Get-AzAccessToken -ResourceUrl "https://service.flow.microsoft.com/" -AsSecureString
     }
     $script:flowToken = Get-TokenString $result.Token
@@ -127,7 +133,7 @@ function Get-AdminToken {
     }
     catch {
         Write-Host "  [Auth] Session expired — re-authenticating..." -ForegroundColor Yellow
-        Connect-AzAccount -UseDeviceAuthentication | Out-Null
+        Connect-AzAccount @script:connectArgs | Out-Null
         $result = Get-AzAccessToken -ResourceUrl "https://api.powerplatform.com/" -AsSecureString
     }
     $script:adminToken = Get-TokenString $result.Token
