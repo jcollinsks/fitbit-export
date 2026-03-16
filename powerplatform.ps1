@@ -432,42 +432,68 @@ foreach ($env in $environments) {
         $token = Get-PPToken
         $connections = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/connections?$apiVer" -Token $token
         if (-not $connections) { $connections = @() }
+        $debugConnFile = "$OutputPath/_debug_connections.log"
+        $httpConnCount = 0
         foreach ($conn in $connections) {
             $connName = $conn.name
+            $connApiId = ""
+            if ($conn.properties.PSObject.Properties.Name -contains 'apiId') {
+                $connApiId = "$($conn.properties.apiId)" -replace '.*/apis/', ''
+            }
             $baseUrl = ""
-            # Connection parameters hold the base URL for HTTP connectors
-            $cp = $conn.properties.connectionParameters
-            if ($cp -and $null -ne $cp.PSObject) {
-                # HTTP with Azure AD: baseUrl or token:ResourceUri
-                foreach ($key in @('baseUrl','token:ResourceUri','token:resourceUri','resourceUri','baseResourceUrl')) {
-                    if ($cp.PSObject.Properties.Name -contains $key) {
-                        $v = "$($cp.$key)"
-                        if ($v -and $v -ne '') { $baseUrl = $v; break }
+
+            # Deep scan the entire connection properties for any URL
+            # (covers connectionParameters, connectionParametersSet, statuses, etc.)
+            $propsToScan = $conn.properties
+            if ($propsToScan -and $null -ne $propsToScan.PSObject) {
+                # First try known keys on connectionParameters
+                $cp = if ($propsToScan.PSObject.Properties.Name -contains 'connectionParameters') { $propsToScan.connectionParameters } else { $null }
+                if ($cp -and $null -ne $cp.PSObject -and -not ($cp -is [string])) {
+                    foreach ($p in $cp.PSObject.Properties) {
+                        $v = "$($p.Value)"
+                        if ($v -match '^https?://') { $baseUrl = $v; break }
                     }
                 }
-                # Also check connectionParameterSets (newer format)
-                if ($baseUrl -eq '' -and $conn.properties.PSObject.Properties.Name -contains 'connectionParametersSet') {
-                    $cps = $conn.properties.connectionParametersSet
+                # Try connectionParametersSet
+                if ($baseUrl -eq '' -and $propsToScan.PSObject.Properties.Name -contains 'connectionParametersSet') {
+                    $cps = $propsToScan.connectionParametersSet
                     if ($cps -and $null -ne $cps.PSObject) {
                         $found = Find-UrlInObject $cps
                         if ($found) { $baseUrl = $found }
                     }
                 }
-            }
-            # Also try statuses.connectionParameters (runtime-resolved values)
-            if ($baseUrl -eq '' -and $conn.properties.PSObject.Properties.Name -contains 'statuses') {
-                foreach ($st in $conn.properties.statuses) {
-                    if ($st.PSObject.Properties.Name -contains 'target') {
-                        $v = "$($st.target)"
-                        if ($v -match '^https?://') { $baseUrl = $v; break }
+                # Try statuses array
+                if ($baseUrl -eq '' -and $propsToScan.PSObject.Properties.Name -contains 'statuses') {
+                    foreach ($st in $propsToScan.statuses) {
+                        if ($null -eq $st -or $null -eq $st.PSObject) { continue }
+                        if ($st.PSObject.Properties.Name -contains 'target') {
+                            $v = "$($st.target)"
+                            if ($v -match '^https?://') { $baseUrl = $v; break }
+                        }
                     }
                 }
             }
+
             if ($connName -and $baseUrl -ne '') {
                 $connBaseUrls[$connName] = $baseUrl
             }
+
+            # Debug: dump HTTP connector connections to file
+            if ($connApiId -match 'http|sendhttp|webcontents|httpwithazuread|httpwebhook') {
+                $httpConnCount++
+                try {
+                    $connJson = $conn.properties | ConvertTo-Json -Depth 10
+                    "=== Connection=$connName ApiId=$connApiId BaseUrl=$baseUrl ===`n$connJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
+                } catch {
+                    "=== Connection=$connName ApiId=$connApiId — serialize failed: $($_.Exception.Message) ===" | Add-Content -Path $debugConnFile -Encoding UTF8
+                }
+            }
         }
-        Write-Host " $($connBaseUrls.Count) with base URLs" -ForegroundColor DarkGray -NoNewline
+        Write-Host " $($connections.Count) total, $httpConnCount HTTP, $($connBaseUrls.Count) with base URLs" -ForegroundColor DarkGray -NoNewline
+        if ($httpConnCount -gt 0 -and $connBaseUrls.Count -eq 0) {
+            Write-Host "" # newline
+            Write-Host "      [DEBUG] HTTP connections found but no base URLs extracted — see _debug_connections.log" -ForegroundColor Magenta
+        }
     }
     catch {
         $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Connections"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
