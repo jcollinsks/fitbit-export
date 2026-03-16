@@ -598,17 +598,39 @@ foreach ($env in $environments) {
                 # Inputs can be a scalar (Compose actions) — only process objects
                 if ($Inputs -is [string] -or $Inputs -is [int] -or $Inputs -is [bool] -or
                     $null -eq $Inputs.PSObject) { return "" }
+
+                # --- HTTP connector: uri/url directly on inputs (shared_sendhttp, httpwebhook) ---
+                # Check this FIRST — HTTP actions have uri at the root level alongside method/headers.
+                # The value may be a string or an expression object; extract string if possible.
+                foreach ($uriKey in @('uri','url')) {
+                    if ($Inputs.PSObject.Properties.Name -contains $uriKey) {
+                        $raw = $Inputs.$uriKey
+                        if ($raw -is [string] -and $raw -ne '') { return $raw }
+                        # Expression object — try to get the literal value
+                        if ($raw -and $null -ne $raw.PSObject) {
+                            $s = "$raw"
+                            if ($s -and $s -ne '' -and $s -notmatch '^System\.') { return $s }
+                        }
+                    }
+                }
+
                 $params = $null
                 if ($Inputs.PSObject.Properties.Name -contains 'parameters') { $params = $Inputs.parameters }
-
-                # For HTTP/webhook actions, the URL is directly on inputs
-                if (-not $params) {
-                    if ($Inputs.PSObject.Properties.Name -contains 'uri') { return "$($Inputs.uri)" }
-                    if ($Inputs.PSObject.Properties.Name -contains 'url') { return "$($Inputs.url)" }
-                    return ""
-                }
+                if (-not $params) { return "" }
                 # params could also be a non-object (expression string)
                 if ($params -is [string] -or $null -eq $params.PSObject) { return "" }
+
+                # --- HTTP with Azure AD (Entra): uri inside parameters ---
+                foreach ($uriKey in @('uri','url')) {
+                    if ($params.PSObject.Properties.Name -contains $uriKey) {
+                        $raw = $params.$uriKey
+                        if ($raw -is [string] -and $raw -ne '') { return $raw }
+                        if ($raw -and $null -ne $raw.PSObject) {
+                            $s = "$raw"
+                            if ($s -and $s -ne '' -and $s -notmatch '^System\.') { return $s }
+                        }
+                    }
+                }
 
                 # SharePoint: dataset = site URL
                 if ($params.PSObject.Properties.Name -contains 'dataset') {
@@ -622,7 +644,7 @@ foreach ($env in $environments) {
                     if ($v -and $v -ne '' -and $v -ne '/') { return $v }
                 }
                 # Generic URL fields
-                foreach ($key in @('siteUrl','token:siteUrl','serviceUrl','baseUrl','url','uri','endpoint','hostname','hostName')) {
+                foreach ($key in @('siteUrl','token:siteUrl','serviceUrl','baseUrl','endpoint','hostname','hostName')) {
                     if ($params.PSObject.Properties.Name -contains $key) {
                         $v = "$($params.$key)"
                         if ($v -and $v -ne '') { return $v }
