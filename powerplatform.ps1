@@ -427,44 +427,64 @@ foreach ($env in $environments) {
 
     # --- CONNECTIONS (fetch base URLs for HTTP connectors) ---
     $connBaseUrls = @{}  # connectionName -> baseUrl
+    $debugConnFile = "$OutputPath/_debug_connections.log"
     try {
         Write-Host " Connections..." -ForegroundColor DarkGray -NoNewline
         $token = Get-PPToken
-        $connections = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/connections?$apiVer" -Token $token
+        $connUri = "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/connections?$apiVer"
+        $connections = Invoke-PPApiPaged -Uri $connUri -Token $token
         if (-not $connections) { $connections = @() }
-        $debugConnFile = "$OutputPath/_debug_connections.log"
-        $httpConnCount = 0
+
+        "=== Environment: $envId ($($env.DisplayName)) — $($connections.Count) connections ===" | Add-Content -Path $debugConnFile -Encoding UTF8
+        "API URL: $connUri`n" | Add-Content -Path $debugConnFile -Encoding UTF8
+
+        # Dump first 5 connections (any type) so we can see the structure
+        $dumped = 0
         foreach ($conn in $connections) {
+            if ($dumped -lt 5) {
+                try {
+                    $connJson = $conn | ConvertTo-Json -Depth 8 -Compress
+                    # Truncate very large connections
+                    if ($connJson.Length -gt 3000) { $connJson = $connJson.Substring(0, 3000) + "...(truncated)" }
+                    "--- Connection #$($dumped+1): name=$($conn.name) ---`n$connJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
+                } catch {}
+                $dumped++
+            }
+
             $connName = $conn.name
             $connApiId = ""
-            if ($conn.properties.PSObject.Properties.Name -contains 'apiId') {
+            # Try multiple paths to find the API identifier
+            if ($conn.PSObject.Properties.Name -contains 'id') {
+                $connApiId = "$($conn.id)" -replace '.*/apis/', '' -replace '/connections/.*', ''
+            }
+            if (-not $connApiId -and $conn.properties -and $conn.properties.PSObject.Properties.Name -contains 'apiId') {
                 $connApiId = "$($conn.properties.apiId)" -replace '.*/apis/', ''
             }
-            $baseUrl = ""
 
-            # Deep scan the entire connection properties for any URL
-            # (covers connectionParameters, connectionParametersSet, statuses, etc.)
-            $propsToScan = $conn.properties
-            if ($propsToScan -and $null -ne $propsToScan.PSObject) {
-                # First try known keys on connectionParameters
-                $cp = if ($propsToScan.PSObject.Properties.Name -contains 'connectionParameters') { $propsToScan.connectionParameters } else { $null }
-                if ($cp -and $null -ne $cp.PSObject -and -not ($cp -is [string])) {
-                    foreach ($p in $cp.PSObject.Properties) {
-                        $v = "$($p.Value)"
-                        if ($v -match '^https?://') { $baseUrl = $v; break }
+            $baseUrl = ""
+            $props = $conn.properties
+            if ($props -and $null -ne $props.PSObject) {
+                # Scan connectionParameters values for URLs
+                if ($props.PSObject.Properties.Name -contains 'connectionParameters') {
+                    $cp = $props.connectionParameters
+                    if ($cp -and $null -ne $cp.PSObject -and -not ($cp -is [string])) {
+                        foreach ($p in $cp.PSObject.Properties) {
+                            $v = "$($p.Value)"
+                            if ($v -match '^https?://') { $baseUrl = $v; break }
+                        }
                     }
                 }
-                # Try connectionParametersSet
-                if ($baseUrl -eq '' -and $propsToScan.PSObject.Properties.Name -contains 'connectionParametersSet') {
-                    $cps = $propsToScan.connectionParametersSet
+                # Scan connectionParametersSet
+                if ($baseUrl -eq '' -and $props.PSObject.Properties.Name -contains 'connectionParametersSet') {
+                    $cps = $props.connectionParametersSet
                     if ($cps -and $null -ne $cps.PSObject) {
                         $found = Find-UrlInObject $cps
                         if ($found) { $baseUrl = $found }
                     }
                 }
-                # Try statuses array
-                if ($baseUrl -eq '' -and $propsToScan.PSObject.Properties.Name -contains 'statuses') {
-                    foreach ($st in $propsToScan.statuses) {
+                # Scan statuses for target URLs
+                if ($baseUrl -eq '' -and $props.PSObject.Properties.Name -contains 'statuses') {
+                    foreach ($st in $props.statuses) {
                         if ($null -eq $st -or $null -eq $st.PSObject) { continue }
                         if ($st.PSObject.Properties.Name -contains 'target') {
                             $v = "$($st.target)"
@@ -472,30 +492,41 @@ foreach ($env in $environments) {
                         }
                     }
                 }
+                # Deep scan entire properties as last resort
+                if ($baseUrl -eq '') {
+                    $found = Find-UrlInObject $props
+                    if ($found) { $baseUrl = $found }
+                }
             }
 
             if ($connName -and $baseUrl -ne '') {
                 $connBaseUrls[$connName] = $baseUrl
             }
 
-            # Debug: dump HTTP connector connections to file
+            # Log HTTP connections with full detail
             if ($connApiId -match 'http|sendhttp|webcontents|httpwithazuread|httpwebhook') {
-                $httpConnCount++
                 try {
-                    $connJson = $conn.properties | ConvertTo-Json -Depth 10
-                    "=== Connection=$connName ApiId=$connApiId BaseUrl=$baseUrl ===`n$connJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
+                    $fullJson = $conn | ConvertTo-Json -Depth 10
+                    "`n=== HTTP Connection: name=$connName apiId=$connApiId baseUrl=$baseUrl ===`n$fullJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
                 } catch {
-                    "=== Connection=$connName ApiId=$connApiId — serialize failed: $($_.Exception.Message) ===" | Add-Content -Path $debugConnFile -Encoding UTF8
+                    "=== HTTP Connection: name=$connName apiId=$connApiId — serialize failed ===" | Add-Content -Path $debugConnFile -Encoding UTF8
                 }
             }
         }
-        Write-Host " $($connections.Count) total, $httpConnCount HTTP, $($connBaseUrls.Count) with base URLs" -ForegroundColor DarkGray -NoNewline
-        if ($httpConnCount -gt 0 -and $connBaseUrls.Count -eq 0) {
-            Write-Host "" # newline
-            Write-Host "      [DEBUG] HTTP connections found but no base URLs extracted — see _debug_connections.log" -ForegroundColor Magenta
+
+        # Summary
+        $summary = "SUMMARY: $($connections.Count) connections, $($connBaseUrls.Count) with base URLs"
+        $summary | Add-Content -Path $debugConnFile -Encoding UTF8
+        if ($connBaseUrls.Count -gt 0) {
+            foreach ($k in $connBaseUrls.Keys) {
+                "  $k => $($connBaseUrls[$k])" | Add-Content -Path $debugConnFile -Encoding UTF8
+            }
         }
+
+        Write-Host " $($connections.Count) total, $($connBaseUrls.Count) with base URLs" -ForegroundColor DarkGray -NoNewline
     }
     catch {
+        "ERROR fetching connections: $($_.Exception.Message)" | Add-Content -Path $debugConnFile -Encoding UTF8
         $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Connections"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
         Write-Host " Warning (connections): $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
