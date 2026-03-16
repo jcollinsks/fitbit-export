@@ -31,6 +31,10 @@
 .PARAMETER ThrottleLimit
     Max concurrent API calls for parallel flow definition fetching. Default 10.
     Increase for faster runs (20-25) or decrease if hitting rate limits (5).
+.PARAMETER EnvironmentId
+    Collect data for a single environment only (by EnvironmentId). Useful for
+    testing or quick runs. Get the ID from the Power Platform admin center URL
+    or from a previous Environments.csv export.
 .PARAMETER Resume
     Resume a previous interrupted run. Skips environments already processed
     (tracked in _checkpoint.txt) and appends to existing CSVs instead of overwriting.
@@ -40,12 +44,14 @@
 .EXAMPLE
     .\powerplatform.ps1 -OutputPath C:\exports
     .\powerplatform.ps1 -IncludeFlowDefinitions -ThrottleLimit 20
+    .\powerplatform.ps1 -EnvironmentId "abc-123-def" -IncludeFlowDefinitions
     .\powerplatform.ps1 -Resume
     .\powerplatform.ps1 -IncludePermissions
 #>
 
 param(
     [string]$OutputPath = "./PowerPlatformExport",
+    [string]$EnvironmentId = "",
     [switch]$IncludePermissions,
     [switch]$IncludeFlowDefinitions,
     [switch]$Resume,
@@ -299,6 +305,17 @@ $environments = $envs | ForEach-Object {
         LastModifiedTime   = $_.properties.lastModifiedTime
         CollectedAt        = $timestamp
     }
+}
+
+# --- Filter to single environment if requested ---
+if ($EnvironmentId -ne "") {
+    $environments = @($environments | Where-Object { $_.EnvironmentId -eq $EnvironmentId })
+    if ($environments.Count -eq 0) {
+        Write-Host "  ERROR: Environment '$EnvironmentId' not found. Available:" -ForegroundColor Red
+        $envs | ForEach-Object { Write-Host "    $($_.name)  ($($_.properties.displayName))" -ForegroundColor Gray }
+        throw "Environment not found"
+    }
+    Write-Host "  Filtered to single environment: $($environments[0].DisplayName)" -ForegroundColor Cyan
 }
 
 $environments | Export-Csv "$OutputPath/Environments.csv" -NoTypeInformation
