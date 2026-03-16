@@ -732,6 +732,7 @@ $tAppConnRefs = [ordered]@{
         (New-ColumnDef "DisplayName")
         (New-ColumnDef "DataSources")
         (New-ColumnDef "EndpointUrl")
+        (New-CalcColumnDef "HttpConnectorType" "SWITCH(TRUE(), CONTAINSSTRING('AppConnectorRefs'[ConnectorId], `"sendhttp`"), `"HTTP`", CONTAINSSTRING('AppConnectorRefs'[ConnectorId], `"webcontents`"), `"HTTP with Azure AD`", CONTAINSSTRING('AppConnectorRefs'[ConnectorId], `"httpwithazuread`"), `"HTTP with Azure AD`", CONTAINSSTRING('AppConnectorRefs'[ConnectorId], `"httpwebhook`"), `"HTTP Webhook`", BLANK())")
     )
     partitions = @((New-CsvPartition "AppConnectorRefs" @(
         @{Name="AppId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
@@ -742,6 +743,9 @@ $tAppConnRefs = [ordered]@{
         (New-MeasureDef "Total Connector References" "COUNTROWS('AppConnectorRefs')")
         (New-MeasureDef "Distinct App Endpoints" "DISTINCTCOUNT('AppConnectorRefs'[EndpointUrl])")
         (New-MeasureDef "App Refs with Endpoints" "CALCULATE(COUNTROWS('AppConnectorRefs'), NOT(ISBLANK('AppConnectorRefs'[EndpointUrl])) && 'AppConnectorRefs'[EndpointUrl] <> `"`") + 0")
+        (New-MeasureDef "App HTTP Connector Refs" "CALCULATE(COUNTROWS('AppConnectorRefs'), NOT(ISBLANK('AppConnectorRefs'[HttpConnectorType]))) + 0" "#,##0" "HTTP Risk")
+        (New-MeasureDef "App HTTP Raw Refs" "CALCULATE(COUNTROWS('AppConnectorRefs'), 'AppConnectorRefs'[HttpConnectorType] = `"HTTP`") + 0" "#,##0" "HTTP Risk")
+        (New-MeasureDef "App HTTP Entra Refs" "CALCULATE(COUNTROWS('AppConnectorRefs'), 'AppConnectorRefs'[HttpConnectorType] = `"HTTP with Azure AD`") + 0" "#,##0" "HTTP Risk")
     )
 }
 
@@ -756,6 +760,7 @@ $tFlowActions = [ordered]@{
         (New-ColumnDef "ConnectorId")
         (New-ColumnDef "OperationId")
         (New-ColumnDef "EndpointUrl")
+        (New-CalcColumnDef "HttpConnectorType" "SWITCH(TRUE(), CONTAINSSTRING('FlowActions'[ConnectorId], `"sendhttp`"), `"HTTP`", CONTAINSSTRING('FlowActions'[ConnectorId], `"webcontents`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowActions'[ConnectorId], `"httpwithazuread`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowActions'[ConnectorId], `"httpwebhook`"), `"HTTP Webhook`", BLANK())")
     )
     partitions = @((New-CsvPartition "FlowActions" @(
         @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
@@ -767,6 +772,9 @@ $tFlowActions = [ordered]@{
         (New-MeasureDef "Total Flow Actions" "COUNTROWS('FlowActions')")
         (New-MeasureDef "Distinct Action Endpoints" "DISTINCTCOUNT('FlowActions'[EndpointUrl])")
         (New-MeasureDef "Actions with Endpoints" "CALCULATE(COUNTROWS('FlowActions'), NOT(ISBLANK('FlowActions'[EndpointUrl])) && 'FlowActions'[EndpointUrl] <> `"`") + 0")
+        (New-MeasureDef "Flow HTTP Actions" "CALCULATE(COUNTROWS('FlowActions'), NOT(ISBLANK('FlowActions'[HttpConnectorType]))) + 0" "#,##0" "HTTP Risk")
+        (New-MeasureDef "Flow HTTP Raw Actions" "CALCULATE(COUNTROWS('FlowActions'), 'FlowActions'[HttpConnectorType] = `"HTTP`") + 0" "#,##0" "HTTP Risk")
+        (New-MeasureDef "Flow HTTP Entra Actions" "CALCULATE(COUNTROWS('FlowActions'), 'FlowActions'[HttpConnectorType] = `"HTTP with Azure AD`") + 0" "#,##0" "HTTP Risk")
     )
 }
 
@@ -781,6 +789,7 @@ $tFlowTriggers = [ordered]@{
         (New-ColumnDef "ConnectorId")
         (New-ColumnDef "OperationId")
         (New-ColumnDef "EndpointUrl")
+        (New-CalcColumnDef "HttpConnectorType" "SWITCH(TRUE(), CONTAINSSTRING('FlowTriggers'[ConnectorId], `"sendhttp`"), `"HTTP`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"webcontents`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"httpwithazuread`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"httpwebhook`"), `"HTTP Webhook`", BLANK())")
     )
     partitions = @((New-CsvPartition "FlowTriggers" @(
         @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
@@ -791,6 +800,7 @@ $tFlowTriggers = [ordered]@{
     measures = @(
         (New-MeasureDef "Total Flow Triggers" "COUNTROWS('FlowTriggers')")
         (New-MeasureDef "Distinct Trigger Endpoints" "DISTINCTCOUNT('FlowTriggers'[EndpointUrl])")
+        (New-MeasureDef "Flow HTTP Triggers" "CALCULATE(COUNTROWS('FlowTriggers'), NOT(ISBLANK('FlowTriggers'[HttpConnectorType]))) + 0" "#,##0" "HTTP Risk")
     )
 }
 
@@ -1025,15 +1035,15 @@ $pageDefs = @{
         displayName = "Endpoint & API Risk"
         visuals = @(
             (New-SlicerVisual "slicerEnvEndpt" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
-            (New-CardVisual "cardEndptConnRefs" 210 20 120 80 100 "AppConnectorRefs" "Total Connector References" "Connector Refs")
-            (New-CardVisual "cardEndptDistApp" 345 20 120 80 200 "AppConnectorRefs" "Distinct App Endpoints" "App Endpoints")
-            (New-CardVisual "cardEndptActions" 480 20 120 80 300 "FlowActions" "Total Flow Actions" "Flow Actions")
-            (New-CardVisual "cardEndptDistAct" 615 20 120 80 400 "FlowActions" "Distinct Action Endpoints" "Action Endpoints")
-            (New-CardVisual "cardEndptDistConn" 750 20 120 80 500 "FlowConnectionRefs" "Distinct Connection URLs" "Connection URLs")
+            (New-SlicerVisual "slicerHttpType" 210 20 170 80 55 "AppConnectorRefs" "HttpConnectorType" "HTTP Connector Type")
+            (New-CardVisual "cardEndptHttpApp" 400 20 105 80 100 "AppConnectorRefs" "App HTTP Connector Refs" "App HTTP Refs")
+            (New-CardVisual "cardEndptHttpRaw" 520 20 105 80 200 "AppConnectorRefs" "App HTTP Raw Refs" "HTTP (Raw)")
+            (New-CardVisual "cardEndptHttpEntra" 640 20 105 80 300 "AppConnectorRefs" "App HTTP Entra Refs" "HTTP (Entra)")
+            (New-CardVisual "cardEndptFlowHttp" 760 20 105 80 400 "FlowActions" "Flow HTTP Actions" "Flow HTTP")
             (New-BarChartVisual "barTopConnectors" 20 120 430 240 1000 "AppConnectorRefs" "DisplayName" "Total Connector References" "Top Connectors")
             (New-TreemapVisual "tmActionTypes" 470 120 430 240 2000 "FlowActions" "ActionType" "FlowActions" "Total Flow Actions" "Action Types")
-            (New-TableVisual "tblAppEndpoints" 20 380 880 160 3000 "AppConnectorRefs" @("DisplayName","ConnectorId","EndpointUrl","DataSources") "App Endpoint Details")
-            (New-TableVisual "tblFlowEndpoints" 20 555 880 160 4000 "FlowActions" @("Name","ActionType","ConnectorId","EndpointUrl","OperationId") "Flow Endpoint Details")
+            (New-TableVisual "tblAppEndpoints" 20 380 880 160 3000 "AppConnectorRefs" @("DisplayName","ConnectorId","HttpConnectorType","EndpointUrl","DataSources") "App Endpoint Details")
+            (New-TableVisual "tblFlowEndpoints" 20 555 880 160 4000 "FlowActions" @("Name","ActionType","ConnectorId","HttpConnectorType","EndpointUrl","OperationId") "Flow Endpoint Details")
         )
     }
     lifecycle = @{
