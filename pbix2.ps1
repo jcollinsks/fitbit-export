@@ -569,7 +569,8 @@ $tApps = [ordered]@{
 $tFlows = [ordered]@{
     name = "Flows"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "FlowId" "string" "none" -IsKey $true)
+        (New-ColumnDef "FlowId")
+        (New-ColumnDef "FlowKey" "string" "none" -IsKey $true)
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
         (New-ColumnDef "DisplayName")
@@ -589,7 +590,8 @@ $tFlows = [ordered]@{
         (New-CalcColumnDef "ManagedStatus" "IF('Flows'[IsManaged] = TRUE(), `"Managed`", `"Unmanaged`")")
     )
     partitions = @((New-CsvPartition "Flows" @(
-        @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
+        @{Name="FlowId"; Type="type text"}, @{Name="FlowKey"; Type="type text"},
+        @{Name="EnvironmentId"; Type="type text"},
         @{Name="EnvironmentName"; Type="type text"}, @{Name="DisplayName"; Type="type text"},
         @{Name="Description"; Type="type text"}, @{Name="State"; Type="type text"},
         @{Name="CreatorObjectId"; Type="type text"}, @{Name="CreatorDisplayName"; Type="type text"},
@@ -753,6 +755,7 @@ $tFlowActions = [ordered]@{
     name = "FlowActions"; lineageTag = (New-Guid)
     columns = @(
         (New-ColumnDef "FlowId" "string" "none" $null $false $true)
+        (New-ColumnDef "FlowKey" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentId")
         (New-ColumnDef "Position" "int64" "none")
         (New-ColumnDef "Name")
@@ -764,7 +767,8 @@ $tFlowActions = [ordered]@{
         (New-CalcColumnDef "HttpConnectorType" "SWITCH(TRUE(), CONTAINSSTRING('FlowActions'[ConnectorId], `"sendhttp`"), `"HTTP`", CONTAINSSTRING('FlowActions'[ConnectorId], `"webcontents`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowActions'[ConnectorId], `"httpwithazuread`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowActions'[ConnectorId], `"httpwebhook`"), `"HTTP Webhook`", BLANK())")
     )
     partitions = @((New-CsvPartition "FlowActions" @(
-        @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
+        @{Name="FlowId"; Type="type text"}, @{Name="FlowKey"; Type="type text"},
+        @{Name="EnvironmentId"; Type="type text"},
         @{Name="Position"; Type="Int64.Type"}, @{Name="Name"; Type="type text"},
         @{Name="ActionType"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
         @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"},
@@ -784,6 +788,7 @@ $tFlowTriggers = [ordered]@{
     name = "FlowTriggers"; lineageTag = (New-Guid)
     columns = @(
         (New-ColumnDef "FlowId" "string" "none" $null $false $true)
+        (New-ColumnDef "FlowKey" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentId")
         (New-ColumnDef "Position" "int64" "none")
         (New-ColumnDef "Name")
@@ -795,7 +800,8 @@ $tFlowTriggers = [ordered]@{
         (New-CalcColumnDef "HttpConnectorType" "SWITCH(TRUE(), CONTAINSSTRING('FlowTriggers'[ConnectorId], `"sendhttp`"), `"HTTP`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"webcontents`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"httpwithazuread`"), `"HTTP with Azure AD`", CONTAINSSTRING('FlowTriggers'[ConnectorId], `"httpwebhook`"), `"HTTP Webhook`", BLANK())")
     )
     partitions = @((New-CsvPartition "FlowTriggers" @(
-        @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
+        @{Name="FlowId"; Type="type text"}, @{Name="FlowKey"; Type="type text"},
+        @{Name="EnvironmentId"; Type="type text"},
         @{Name="Position"; Type="Int64.Type"}, @{Name="Name"; Type="type text"},
         @{Name="TriggerType"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
         @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"},
@@ -812,13 +818,15 @@ $tFlowConnRefs = [ordered]@{
     name = "FlowConnectionRefs"; lineageTag = (New-Guid)
     columns = @(
         (New-ColumnDef "FlowId" "string" "none" $null $false $true)
+        (New-ColumnDef "FlowKey" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentId")
         (New-ColumnDef "ConnectorId")
         (New-ColumnDef "ConnectionName")
         (New-ColumnDef "ConnectionUrl")
     )
     partitions = @((New-CsvPartition "FlowConnectionRefs" @(
-        @{Name="FlowId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
+        @{Name="FlowId"; Type="type text"}, @{Name="FlowKey"; Type="type text"},
+        @{Name="EnvironmentId"; Type="type text"},
         @{Name="ConnectorId"; Type="type text"}, @{Name="ConnectionName"; Type="type text"},
         @{Name="ConnectionUrl"; Type="type text"}
     )))
@@ -845,9 +853,9 @@ $modelBim = [ordered]@{
             (New-RelationshipDef "rel_DlpRules_Policy" "DlpConnectorRules" "PolicyId" "DlpPolicies" "PolicyId")
             (New-RelationshipDef "rel_Usage_Env" "UsageAnalytics" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_AppConnRefs_Apps" "AppConnectorRefs" "AppId" "Apps" "AppId")
-            (New-RelationshipDef "rel_FlowActions_Flows" "FlowActions" "FlowId" "Flows" "FlowId")
-            (New-RelationshipDef "rel_FlowTriggers_Flows" "FlowTriggers" "FlowId" "Flows" "FlowId")
-            (New-RelationshipDef "rel_FlowConnRefs_Flows" "FlowConnectionRefs" "FlowId" "Flows" "FlowId")
+            (New-RelationshipDef "rel_FlowActions_Flows" "FlowActions" "FlowKey" "Flows" "FlowKey")
+            (New-RelationshipDef "rel_FlowTriggers_Flows" "FlowTriggers" "FlowKey" "Flows" "FlowKey")
+            (New-RelationshipDef "rel_FlowConnRefs_Flows" "FlowConnectionRefs" "FlowKey" "Flows" "FlowKey")
         )
         expressions = @(
             [ordered]@{
@@ -1179,4 +1187,8 @@ Write-Host "  Flows -> Environments (EnvironmentId)" -ForegroundColor Gray
 Write-Host "  Connectors -> Environments (EnvironmentId)" -ForegroundColor Gray
 Write-Host "  DlpConnectorRules -> DlpPolicies (PolicyId)" -ForegroundColor Gray
 Write-Host "  UsageAnalytics -> Environments (EnvironmentId)" -ForegroundColor Gray
+Write-Host "  AppConnectorRefs -> Apps (AppId)" -ForegroundColor Gray
+Write-Host "  FlowActions -> Flows (FlowKey)" -ForegroundColor Gray
+Write-Host "  FlowTriggers -> Flows (FlowKey)" -ForegroundColor Gray
+Write-Host "  FlowConnectionRefs -> Flows (FlowKey)" -ForegroundColor Gray
 Write-Host ""
