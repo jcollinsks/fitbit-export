@@ -141,6 +141,24 @@ function Get-AdminToken {
     return $script:adminToken
 }
 
+$script:bapToken = $null
+$script:bapTokenExpiry = [datetime]::MinValue
+function Get-BapToken {
+    if ([datetime]::UtcNow -lt $script:bapTokenExpiry) { return $script:bapToken }
+    Write-Host "  [Auth] Refreshing BAP token..." -ForegroundColor DarkGray
+    try {
+        $result = Get-AzAccessToken -ResourceUrl "https://api.bap.microsoft.com/" -AsSecureString
+    }
+    catch {
+        Write-Host "  [Auth] Session expired — re-authenticating..." -ForegroundColor Yellow
+        Connect-AzAccount @script:connectArgs | Out-Null
+        $result = Get-AzAccessToken -ResourceUrl "https://api.bap.microsoft.com/" -AsSecureString
+    }
+    $script:bapToken = Get-TokenString $result.Token
+    $script:bapTokenExpiry = [datetime]::UtcNow.AddMinutes(20)
+    return $script:bapToken
+}
+
 # Force-expire all cached tokens so the next API call gets a fresh one
 function Reset-AllTokens {
     $script:ppTokenExpiry = [datetime]::MinValue
@@ -486,6 +504,60 @@ foreach ($env in $environments) {
             $totalConnections++
         }
         Write-Host " $envConnCount ($($connBaseUrls.Count) with URLs)" -ForegroundColor DarkGray -NoNewline
+
+        # --- Pass 2: Non-admin endpoint for HTTP connections to get connectionParameters ---
+        # The admin endpoint strips connectionParameters. For HTTP-type connectors, the base URL
+        # (e.g. baseResourceUrl) is ONLY in connectionParameters. Try the non-admin endpoint
+        # which returns full details for connections the caller can access.
+        $httpConnections = @($connections | Where-Object {
+            $cId = $_.properties.apiId -replace '.*/apis/', ''
+            $cId -match 'sendhttp|webcontents|httpwithazuread|httpwebhook'
+        } | Where-Object { -not $connBaseUrls.ContainsKey($_.name) })
+
+        if ($httpConnections.Count -gt 0) {
+            Write-Host " HTTP detail..." -ForegroundColor DarkGray -NoNewline
+            $httpResolved = 0
+            foreach ($hc in $httpConnections) {
+                $hcApiId = $hc.properties.apiId -replace '.*/apis/', ''
+                $hcName = $hc.name
+                try {
+                    $detailUri = "$pa/providers/Microsoft.PowerApps/apis/$hcApiId/connections/${hcName}?$apiVer&`$filter=environment eq '$envId'"
+                    $detailConn = Invoke-RestMethod -Uri $detailUri -Method Get -Headers @{
+                        "Authorization" = "Bearer $token"; "Accept" = "application/json"
+                    } -TimeoutSec 30
+                    if ($detailConn -and $detailConn.properties) {
+                        $cp = $detailConn.properties.connectionParameters
+                        $hcUrl = ""
+                        if ($cp) {
+                            foreach ($k in @('baseResourceUrl', 'token:baseResourceUrl', 'baseUrl', 'resourceUrl',
+                                             'serviceUrl', 'url', 'siteUrl', 'token:siteUrl')) {
+                                if ($cp.PSObject.Properties.Name -contains $k) {
+                                    $v = "$($cp.$k)"
+                                    if ($v -match '^https?://') { $hcUrl = $v; break }
+                                }
+                            }
+                            if (-not $hcUrl) {
+                                # Scan all properties for a URL value
+                                foreach ($p in $cp.PSObject.Properties) {
+                                    $v = "$($p.Value)"
+                                    if ($v -match '^https?://' -and $v -notmatch '\.(png|jpg|svg|gif|ico)') {
+                                        $hcUrl = $v; break
+                                    }
+                                }
+                            }
+                        }
+                        if ($hcUrl) {
+                            $connBaseUrls[$hcName] = $hcUrl
+                            $httpResolved++
+                        }
+                    }
+                }
+                catch {
+                    # Non-admin endpoint fails for other users' connections — expected
+                }
+            }
+            Write-Host " $httpResolved/$($httpConnections.Count) resolved" -ForegroundColor DarkGray -NoNewline
+        }
     }
     catch {
         $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Connectors"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
@@ -1143,13 +1215,19 @@ Write-Host "  Found $($allDlpPolicies.Count) policies, $($allDlpConnectorRules.C
 
 Write-Host "[6/7] Collecting usage analytics..." -ForegroundColor Yellow
 $usageCollected = $false
-# Try BAP analytics endpoint with both token types
-foreach ($tokenName in @("PP", "Admin")) {
+# Try multiple endpoint/token/API-version combinations for usage analytics
+$usageAttempts = @(
+    @{ Name="BAP+BapToken";   Uri="$bap/providers/Microsoft.BusinessAppPlatform/scopes/admin/analytics/usage?$apiVer"; Token={ Get-BapToken } }
+    @{ Name="BAP+PPToken";    Uri="$bap/providers/Microsoft.BusinessAppPlatform/scopes/admin/analytics/usage?$apiVer"; Token={ Get-PPToken } }
+    @{ Name="BAP+AdminToken"; Uri="$bap/providers/Microsoft.BusinessAppPlatform/scopes/admin/analytics/usage?$apiVer"; Token={ Get-AdminToken } }
+    @{ Name="PP-API+Admin";   Uri="https://api.powerplatform.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/analytics/usage?api-version=2022-03-01-preview"; Token={ Get-AdminToken } }
+    @{ Name="BAP+v2021";      Uri="$bap/providers/Microsoft.BusinessAppPlatform/scopes/admin/analytics/usage?api-version=2021-04-01"; Token={ Get-BapToken } }
+)
+foreach ($attempt in $usageAttempts) {
     if ($usageCollected) { break }
     try {
-        $uToken = if ($tokenName -eq "PP") { Get-PPToken } else { Get-AdminToken }
-        $usageUri = "$bap/providers/Microsoft.BusinessAppPlatform/scopes/admin/analytics/usage?$apiVer"
-        $usage = Invoke-PPApiPaged -Uri $usageUri -Token $uToken
+        $uToken = & $attempt.Token
+        $usage = Invoke-PPApiPaged -Uri $attempt.Uri -Token $uToken
         if ($usage -and $usage.Count -gt 0) {
             $allUsage = $usage | ForEach-Object {
                 [PSCustomObject]@{
@@ -1158,12 +1236,15 @@ foreach ($tokenName in @("PP", "Admin")) {
                 }
             }
             $allUsage | Export-Csv "$OutputPath/UsageAnalytics.csv" -NoTypeInformation
-            Write-Host "  Found $($allUsage.Count) usage records (via $tokenName token)" -ForegroundColor Gray
+            Write-Host "  Found $($allUsage.Count) usage records (via $($attempt.Name))" -ForegroundColor Gray
             $usageCollected = $true
+        }
+        else {
+            Write-Host "  $($attempt.Name): empty response" -ForegroundColor DarkGray
         }
     }
     catch {
-        Write-Host "  Note: Usage analytics with $tokenName token failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+        Write-Host "  $($attempt.Name): $($_.Exception.Message)" -ForegroundColor DarkGray
     }
 }
 if (-not $usageCollected) {
@@ -1247,6 +1328,42 @@ if ($IncludePermissions) {
     }
 
     Write-Host "  Found $totalAppPerms app permissions, $totalFlowPerms flow permissions" -ForegroundColor Gray
+
+    # Update Apps.csv SharedUsersCount/SharedGroupsCount from actual permission data
+    # The admin API's sharedGroupsCount is often empty; actual counts are more reliable
+    Write-Host "  Updating Apps.csv with accurate shared user/group counts..." -ForegroundColor DarkGray
+    try {
+        $permsCsv = Import-Csv "$OutputPath/AppPermissions.csv"
+        $appsCsvData = Import-Csv "$OutputPath/Apps.csv"
+        # Count users and groups per app from permissions
+        $permCounts = @{}
+        foreach ($perm in $permsCsv) {
+            $key = $perm.AppId
+            if (-not $permCounts.ContainsKey($key)) {
+                $permCounts[$key] = @{ Users = 0; Groups = 0 }
+            }
+            if ($perm.PrincipalType -eq 'Group') {
+                $permCounts[$key].Groups++
+            }
+            elseif ($perm.PrincipalType -eq 'User') {
+                $permCounts[$key].Users++
+            }
+        }
+        # Update the Apps.csv with actual counts
+        $updated = 0
+        foreach ($app in $appsCsvData) {
+            if ($permCounts.ContainsKey($app.AppId)) {
+                $app.SharedUsersCount = $permCounts[$app.AppId].Users
+                $app.SharedGroupsCount = $permCounts[$app.AppId].Groups
+                $updated++
+            }
+        }
+        $appsCsvData | Export-Csv "$OutputPath/Apps.csv" -NoTypeInformation
+        Write-Host "  Updated $updated apps with permission-based sharing counts" -ForegroundColor Gray
+    }
+    catch {
+        Write-Host "  Warning: Could not update sharing counts: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
 }
 else {
     Write-Host "[7/7] Skipping permissions (use -IncludePermissions to collect)" -ForegroundColor DarkGray
