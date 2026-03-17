@@ -350,10 +350,10 @@ else {
     # Fresh run — initialize CSV files with headers
     Initialize-Csv "$OutputPath/Apps.csv" @("AppId","EnvironmentId","EnvironmentName","DisplayName","Description","AppType","OwnerObjectId","OwnerDisplayName","OwnerEmail","CreatedTime","LastModifiedTime","LastPublishedTime","AppVersion","Status","UsesPremiumApi","UsesCustomApi","SharedUsersCount","SharedGroupsCount","IsSolutionAware","SolutionId","BypassConsent","CollectedAt")
     Initialize-Csv "$OutputPath/AppConnectorRefs.csv" @("AppId","EnvironmentId","ConnectorId","DisplayName","DataSources","EndpointUrl")
-    Initialize-Csv "$OutputPath/Flows.csv" @("FlowId","EnvironmentId","EnvironmentName","DisplayName","Description","State","CreatorObjectId","CreatorDisplayName","CreatedTime","LastModifiedTime","TriggerType","IsSolutionAware","SolutionId","IsManaged","SuspensionReason","CollectedAt")
-    Initialize-Csv "$OutputPath/FlowTriggers.csv" @("FlowId","EnvironmentId","Position","Name","TriggerType","ConnectorId","OperationId","EndpointUrl","BaseUrl")
-    Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowId","EnvironmentId","Position","Name","ActionType","ConnectorId","OperationId","EndpointUrl","BaseUrl")
-    Initialize-Csv "$OutputPath/FlowConnectionRefs.csv" @("FlowId","EnvironmentId","ConnectorId","ConnectionName","ConnectionUrl")
+    Initialize-Csv "$OutputPath/Flows.csv" @("FlowKey","FlowId","EnvironmentId","EnvironmentName","DisplayName","Description","State","CreatorObjectId","CreatorDisplayName","CreatedTime","LastModifiedTime","TriggerType","IsSolutionAware","SolutionId","IsManaged","SuspensionReason","CollectedAt")
+    Initialize-Csv "$OutputPath/FlowTriggers.csv" @("FlowKey","FlowId","EnvironmentId","Position","Name","TriggerType","ConnectorId","OperationId","EndpointUrl","BaseUrl")
+    Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowKey","FlowId","EnvironmentId","Position","Name","ActionType","ConnectorId","OperationId","EndpointUrl","BaseUrl")
+    Initialize-Csv "$OutputPath/FlowConnectionRefs.csv" @("FlowKey","FlowId","EnvironmentId","ConnectorId","ConnectionName","ConnectionUrl")
     Initialize-Csv "$OutputPath/Connectors.csv" @("ConnectorId","EnvironmentId","EnvironmentName","DisplayName","Description","Publisher","Tier","IsCustom","IconUri","CollectedAt")
     # Clear checkpoint for fresh run
     if (Test-Path $checkpointFile) { Remove-Item $checkpointFile }
@@ -707,6 +707,9 @@ foreach ($env in $environments) {
                 Write-Host "      Flows: $flowIndex / $($flows.Count) ($flowPct%)" -ForegroundColor DarkGray
             }
 
+            # Composite key for Power BI relationships (unique even if FlowId repeats across environments)
+            $flowKey = "$($f.name)|$envId"
+
             # Use data from the V2 list response (always available, no extra API call)
             $flowDefinition = $null
             $defSummary = $f.properties.definitionSummary
@@ -883,7 +886,7 @@ foreach ($env in $environments) {
             # Writes directly to CSV instead of returning a list (avoids PowerShell pipeline
             # unrolling which turns List<T> into $null/single-object on return)
             function Write-FlattenedActions {
-                param($ActionsObj, [string]$FlowId, [string]$EnvId, [string]$OutPath, [ref]$Pos, [ref]$Count, [hashtable]$BaseUrls)
+                param($ActionsObj, [string]$FlowKey, [string]$FlowId, [string]$EnvId, [string]$OutPath, [ref]$Pos, [ref]$Count, [hashtable]$BaseUrls)
                 if (-not $ActionsObj -or $null -eq $ActionsObj.PSObject) { return }
                 foreach ($prop in $ActionsObj.PSObject.Properties) {
                     $stepName = $prop.Name
@@ -898,6 +901,10 @@ foreach ($env in $environments) {
                     $baseUrl = ""
                     if ($BaseUrls -and $hostInfo.ConnectionName -and $BaseUrls.ContainsKey($hostInfo.ConnectionName)) {
                         $baseUrl = $BaseUrls[$hostInfo.ConnectionName]
+                    }
+                    # Fallback: derive base URL (scheme + host) from the endpoint URL
+                    if ($baseUrl -eq '' -and $epUrl -match '^(https?://[^/]+)') {
+                        $baseUrl = $matches[1]
                     }
 
                     # Debug: dump HTTP connector inputs to file when endpoint is empty
@@ -914,7 +921,7 @@ foreach ($env in $environments) {
                     }
 
                     Append-CsvRow "$OutPath/FlowActions.csv" ([PSCustomObject]@{
-                        FlowId=$FlowId; EnvironmentId=$EnvId; Position=$Pos.Value; Name=$stepName
+                        FlowKey=$FlowKey; FlowId=$FlowId; EnvironmentId=$EnvId; Position=$Pos.Value; Name=$stepName
                         ActionType=$stepType; ConnectorId=$hostInfo.ConnectorId
                         OperationId=$hostInfo.OperationId; EndpointUrl=$epUrl; BaseUrl=$baseUrl
                     })
@@ -923,24 +930,24 @@ foreach ($env in $environments) {
 
                     # Recurse into nested actions: Scope, ForEach, Until have .actions
                     if ($step.PSObject.Properties.Name -contains 'actions' -and $step.actions) {
-                        Write-FlattenedActions $step.actions $FlowId $EnvId $OutPath $Pos $Count $BaseUrls
+                        Write-FlattenedActions $step.actions $FlowKey $FlowId $EnvId $OutPath $Pos $Count $BaseUrls
                     }
                     # Condition: .else.actions
                     if ($step.PSObject.Properties.Name -contains 'else' -and $step.else -and
                         $step.else.PSObject.Properties.Name -contains 'actions' -and $step.else.actions) {
-                        Write-FlattenedActions $step.else.actions $FlowId $EnvId $OutPath $Pos $Count $BaseUrls
+                        Write-FlattenedActions $step.else.actions $FlowKey $FlowId $EnvId $OutPath $Pos $Count $BaseUrls
                     }
                     # Switch: .cases.*.actions and .default.actions
                     if ($step.PSObject.Properties.Name -contains 'cases' -and $step.cases) {
                         foreach ($caseProp in $step.cases.PSObject.Properties) {
                             if ($caseProp.Value.PSObject.Properties.Name -contains 'actions' -and $caseProp.Value.actions) {
-                                Write-FlattenedActions $caseProp.Value.actions $FlowId $EnvId $OutPath $Pos $Count $BaseUrls
+                                Write-FlattenedActions $caseProp.Value.actions $FlowKey $FlowId $EnvId $OutPath $Pos $Count $BaseUrls
                             }
                         }
                     }
                     if ($step.PSObject.Properties.Name -contains 'default' -and $step.default -and
                         $step.default.PSObject.Properties.Name -contains 'actions' -and $step.default.actions) {
-                        Write-FlattenedActions $step.default.actions $FlowId $EnvId $OutPath $Pos $Count $BaseUrls
+                        Write-FlattenedActions $step.default.actions $FlowKey $FlowId $EnvId $OutPath $Pos $Count $BaseUrls
                     }
                 }
             }
@@ -958,7 +965,7 @@ foreach ($env in $environments) {
                     $crBaseUrl = if ($crConnName -and $connBaseUrls.ContainsKey($crConnName)) { $connBaseUrls[$crConnName] } else { "" }
 
                     Append-CsvRow "$OutputPath/FlowConnectionRefs.csv" ([PSCustomObject]@{
-                        FlowId=$f.name; EnvironmentId=$envId; ConnectorId=$crConnId; ConnectionName=$crConnName; ConnectionUrl=$crBaseUrl
+                        FlowKey=$flowKey; FlowId=$f.name; EnvironmentId=$envId; ConnectorId=$crConnId; ConnectionName=$crConnName; ConnectionUrl=$crBaseUrl
                     })
                     $totalFlowConnRefs++
 
@@ -997,9 +1004,13 @@ foreach ($env in $environments) {
                         if ($hostInfo.ConnectionName -and $connBaseUrls.ContainsKey($hostInfo.ConnectionName)) {
                             $baseUrl = $connBaseUrls[$hostInfo.ConnectionName]
                         }
+                        # Fallback: derive base URL (scheme + host) from the endpoint URL
+                        if ($baseUrl -eq '' -and $epUrl -match '^(https?://[^/]+)') {
+                            $baseUrl = $matches[1]
+                        }
                         if ($pos -eq 0) { $triggerType = $tType }
                         Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
-                            FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=$stepName
+                            FlowKey=$flowKey; FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=$stepName
                             TriggerType=$tType; ConnectorId=$hostInfo.ConnectorId
                             OperationId=$hostInfo.OperationId; EndpointUrl=$epUrl; BaseUrl=$baseUrl
                         })
@@ -1009,7 +1020,7 @@ foreach ($env in $environments) {
                     if ($flowDefinition.PSObject.Properties.Name -contains 'actions' -and $flowDefinition.actions) {
                         $actionPos = [ref]0
                         $actionCount = [ref]0
-                        Write-FlattenedActions $flowDefinition.actions $f.name $envId $OutputPath $actionPos $actionCount $connBaseUrls
+                        Write-FlattenedActions $flowDefinition.actions $flowKey $f.name $envId $OutputPath $actionPos $actionCount $connBaseUrls
                         $totalActions += $actionCount.Value
                     }
                 }
@@ -1022,7 +1033,7 @@ foreach ($env in $environments) {
                             $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
                             if ($pos -eq 0) { $triggerType = $t.type }
                             Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
-                                FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
+                                FlowKey=$flowKey; FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
                                 TriggerType=$t.type; ConnectorId=$tConnId; OperationId=$t.swaggerOperationId; EndpointUrl=""; BaseUrl=""
                             })
                             $pos++; $totalTriggers++
@@ -1033,7 +1044,7 @@ foreach ($env in $environments) {
                         foreach ($a in $defSummary.actions) {
                             $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
                             Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
-                                FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
+                                FlowKey=$flowKey; FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
                                 ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=""; BaseUrl=""
                             })
                             $pos++; $totalActions++
@@ -1046,7 +1057,7 @@ foreach ($env in $environments) {
             }
 
             Append-CsvRow "$OutputPath/Flows.csv" ([PSCustomObject]@{
-                FlowId=$f.name; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
+                FlowKey=$flowKey; FlowId=$f.name; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
                 DisplayName=$f.properties.displayName; Description=$f.properties.description
                 State=$f.properties.state; CreatorObjectId=$creatorId
                 CreatorDisplayName=$creatorName; CreatedTime=$f.properties.createdTime
@@ -1266,7 +1277,9 @@ Write-Host "  4. Create relationships:" -ForegroundColor Gray
 Write-Host "     - Apps.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
 Write-Host "     - Flows.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
 Write-Host "     - AppConnectorRefs.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
-Write-Host "     - FlowConnectionRefs.FlowId -> Flows.FlowId" -ForegroundColor Gray
+Write-Host "     - FlowActions.FlowKey -> Flows.FlowKey" -ForegroundColor Gray
+Write-Host "     - FlowTriggers.FlowKey -> Flows.FlowKey" -ForegroundColor Gray
+Write-Host "     - FlowConnectionRefs.FlowKey -> Flows.FlowKey" -ForegroundColor Gray
 Write-Host "     - FlowConnectionRefs.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
 Write-Host "     - DlpConnectorRules.PolicyId -> DlpPolicies.PolicyId" -ForegroundColor Gray
 Write-Host "     - UsageAnalytics.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
