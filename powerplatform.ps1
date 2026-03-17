@@ -355,11 +355,12 @@ else {
     Initialize-Csv "$OutputPath/FlowActions.csv" @("FlowKey","FlowId","EnvironmentId","Position","Name","ActionType","ConnectorId","OperationId","EndpointUrl","BaseUrl")
     Initialize-Csv "$OutputPath/FlowConnectionRefs.csv" @("FlowKey","FlowId","EnvironmentId","ConnectorId","ConnectionName","ConnectionUrl")
     Initialize-Csv "$OutputPath/Connectors.csv" @("ConnectorId","EnvironmentId","EnvironmentName","DisplayName","Description","Publisher","Tier","IsCustom","IconUri","CollectedAt")
+    Initialize-Csv "$OutputPath/Connections.csv" @("ConnectionId","ConnectorId","EnvironmentId","EnvironmentName","DisplayName","ConnectionUrl","CreatedByObjectId","CreatedByName","CreatedByEmail","CreatedTime","Status","IsShared","CollectedAt")
     # Clear checkpoint for fresh run
     if (Test-Path $checkpointFile) { Remove-Item $checkpointFile }
 }
 
-$totalApps = 0; $totalFlows = 0; $totalConnectors = 0
+$totalApps = 0; $totalFlows = 0; $totalConnectors = 0; $totalConnections = 0
 $totalAppConnRefs = 0; $totalTriggers = 0; $totalActions = 0; $totalFlowConnRefs = 0
 $envCount = $environments.Count
 $envIndex = 0
@@ -402,7 +403,9 @@ foreach ($env in $environments) {
     $envStartTime = Get-Date
     $envTimeoutMin = 10
 
-    # --- CONNECTORS ---
+    # --- CONNECTORS & CONNECTIONS (fetched first to build URL lookups for apps and flows) ---
+    $connBaseUrls = @{}   # connectionName -> URL (exact match)
+    $envConnByType = @{}  # connectorId -> [list of unique URLs] (all connections for that connector type)
     try {
         Write-Host "    Connectors..." -ForegroundColor DarkGray -NoNewline
         $token = Get-PPToken
@@ -419,125 +422,74 @@ foreach ($env in $environments) {
             $totalConnectors++
         }
         Write-Host " $totalConnectors" -ForegroundColor DarkGray -NoNewline
+
+        Write-Host " Connections..." -ForegroundColor DarkGray -NoNewline
+        $connections = Invoke-PPApiPaged -Uri "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/connections?$apiVer" -Token $token
+        $envConnCount = 0
+        foreach ($c in $connections) {
+            $envConnCount++
+            if ($envConnCount % 1000 -eq 0) {
+                Write-Host "$envConnCount..." -ForegroundColor DarkGray -NoNewline
+            }
+            $connId = $c.properties.apiId -replace '.*/apis/', ''
+            $status = if ($c.properties.statuses -and $c.properties.statuses.Count -gt 0) { $c.properties.statuses[0].status } else { "Unknown" }
+
+            # Extract connection URL from connectionParameters or connectionParametersSet
+            $connUrl = ""
+            $cp = $c.properties.connectionParameters
+            if ($cp) {
+                if ($cp.server) { $connUrl = $cp.server }
+                if ($cp.database) { $connUrl = if ($connUrl) { "$connUrl/$($cp.database)" } else { $cp.database } }
+                if (-not $connUrl -and $cp.workflowEndpoint) { $connUrl = $cp.workflowEndpoint }
+                if (-not $connUrl -and $cp.siteUrl) { $connUrl = $cp.siteUrl }
+                if (-not $connUrl -and $cp.'token:siteUrl') { $connUrl = $cp.'token:siteUrl' }
+                if (-not $connUrl -and $cp.gateway) { $connUrl = $cp.gateway }
+                if (-not $connUrl -and $cp.url) { $connUrl = $cp.url }
+                if (-not $connUrl -and $cp.serviceUrl) { $connUrl = $cp.serviceUrl }
+                if (-not $connUrl -and $cp.endpoint) { $connUrl = $cp.endpoint }
+                if (-not $connUrl -and $cp.baseUrl) { $connUrl = $cp.baseUrl }
+                if (-not $connUrl -and $cp.baseResourceUrl) { $connUrl = $cp.baseResourceUrl }
+                if (-not $connUrl -and $cp.'token:baseResourceUrl') { $connUrl = $cp.'token:baseResourceUrl' }
+                if (-not $connUrl -and $cp.resourceUrl) { $connUrl = $cp.resourceUrl }
+            }
+            if (-not $connUrl -and $c.properties.connectionParametersSet) {
+                $vals = $c.properties.connectionParametersSet.values
+                if ($vals) {
+                    if ($vals.server.value) { $connUrl = $vals.server.value }
+                    elseif ($vals.siteUrl.value) { $connUrl = $vals.siteUrl.value }
+                    elseif ($vals.url.value) { $connUrl = $vals.url.value }
+                    elseif ($vals.baseResourceUrl.value) { $connUrl = $vals.baseResourceUrl.value }
+                    elseif ($vals.resourceUrl.value) { $connUrl = $vals.resourceUrl.value }
+                }
+            }
+
+            # Build lookups for cross-referencing with apps and flows
+            if ($connUrl) {
+                $connUrlStr = [string]$connUrl
+                $connBaseUrls[$c.name] = $connUrlStr
+                # Group all URLs by connector type (e.g. shared_sharepointonline -> all SP site URLs)
+                if (-not $envConnByType.ContainsKey($connId)) {
+                    $envConnByType[$connId] = [System.Collections.Generic.List[string]]::new()
+                }
+                if ($envConnByType[$connId] -notcontains $connUrlStr) {
+                    $envConnByType[$connId].Add($connUrlStr)
+                }
+            }
+
+            Append-CsvRow "$OutputPath/Connections.csv" ([PSCustomObject]@{
+                ConnectionId=$c.name; ConnectorId=$connId; EnvironmentId=$envId; EnvironmentName=$env.DisplayName
+                DisplayName=$c.properties.displayName; ConnectionUrl=$connUrl
+                CreatedByObjectId=$c.properties.createdBy.id
+                CreatedByName=$c.properties.createdBy.displayName; CreatedByEmail=$c.properties.createdBy.email
+                CreatedTime=$c.properties.createdTime; Status=$status; IsShared=$c.properties.allowSharing; CollectedAt=$timestamp
+            })
+            $totalConnections++
+        }
+        Write-Host " $envConnCount ($($connBaseUrls.Count) with URLs)" -ForegroundColor DarkGray -NoNewline
     }
     catch {
         $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Connectors"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
-        Write-Host " Warning (connectors): $($_.Exception.Message)" -ForegroundColor DarkYellow
-    }
-
-    # --- CONNECTION BASE URLs (fetch per-API for HTTP connector types) ---
-    # The admin endpoint (/scopes/admin/) returns ConnectionWithoutConnectionParameters
-    # which strips the connectionParameters property. We use a two-pass approach:
-    # 1. Admin endpoint to list all HTTP connections in the environment (all users)
-    # 2. Non-admin endpoint to fetch each connection individually (includes connectionParameters)
-    $connBaseUrls = @{}  # connectionName -> baseUrl
-    try {
-        Write-Host " HTTP connections..." -ForegroundColor DarkGray -NoNewline
-        $token = Get-PPToken
-        $httpApiIds = @("shared_sendhttp", "shared_webcontents", "shared_httpwithazuread", "shared_httpwebhook")
-        $debugConnFile = "$OutputPath/_debug_connrefs.log"
-        $totalHttpConns = 0
-
-        # Helper to extract base URL from connection properties
-        function Get-ConnectionBaseUrl {
-            param($props)
-            $baseUrl = ""
-            if (-not $props -or $null -eq $props.PSObject) { return "" }
-
-            # Check connectionParameters for base resource URL
-            if ($props.PSObject.Properties.Name -contains 'connectionParameters') {
-                $cp = $props.connectionParameters
-                if ($cp -and $null -ne $cp.PSObject -and -not ($cp -is [string])) {
-                    # First check for known parameter names
-                    foreach ($knownKey in @('baseResourceUrl', 'token:baseResourceUrl', 'baseUrl', 'resourceUrl')) {
-                        if ($cp.PSObject.Properties.Name -contains $knownKey) {
-                            $v = "$($cp.$knownKey)"
-                            if ($v -match '^https?://') { return $v }
-                        }
-                    }
-                    # Fallback: scan all properties for URL values
-                    foreach ($p in $cp.PSObject.Properties) {
-                        $v = "$($p.Value)"
-                        if ($v -match '^https?://' -and $v -notmatch '\.(png|jpg|svg|gif|ico)') {
-                            return $v
-                        }
-                    }
-                }
-            }
-
-            # Check connectionParametersSet.values for multi-auth connectors
-            if ($props.PSObject.Properties.Name -contains 'connectionParametersSet') {
-                $cps = $props.connectionParametersSet
-                if ($cps -and $null -ne $cps.PSObject) {
-                    # Check values property (multi-auth structure)
-                    if ($cps.PSObject.Properties.Name -contains 'values') {
-                        $vals = $cps.values
-                        if ($vals -and $null -ne $vals.PSObject) {
-                            foreach ($p in $vals.PSObject.Properties) {
-                                $v = "$($p.Value)"
-                                if ($v -match '^https?://' -and $v -notmatch '\.(png|jpg|svg|gif|ico)') {
-                                    return $v
-                                }
-                            }
-                        }
-                    }
-                    # Check nested oAuthSettings.customParameters.resourceUri
-                    try {
-                        $resUri = $cps.values.token.oAuthSettings.customParameters.resourceUri.value
-                        if ($resUri -match '^https?://') { return $resUri }
-                    } catch {}
-                }
-            }
-
-            return ""
-        }
-
-        foreach ($apiId in $httpApiIds) {
-            # Pass 1: Admin endpoint to list ALL connections (all users) in this env
-            $adminUri = "$pa/providers/Microsoft.PowerApps/scopes/admin/environments/$envId/apis/$apiId/connections?$apiVer"
-            $apiConns = Invoke-PPApi -Uri $adminUri -Token $token -TokenRefresh { Get-PPToken }
-            if (-not $apiConns -or -not $apiConns.value) { continue }
-
-            foreach ($conn in $apiConns.value) {
-                $totalHttpConns++
-                $connName = $conn.name
-                $baseUrl = ""
-
-                # Try extracting from admin response first (sometimes has partial data)
-                $baseUrl = Get-ConnectionBaseUrl $conn.properties
-
-                # Pass 2: If no base URL found, fetch individual connection via non-admin endpoint
-                # which includes full connectionParameters
-                if ($baseUrl -eq '' -and $connName) {
-                    try {
-                        $detailUri = "$pa/providers/Microsoft.PowerApps/apis/$apiId/connections/${connName}?$apiVer&`$filter=environment eq '$envId'"
-                        $detailConn = Invoke-PPApi -Uri $detailUri -Token $token -TokenRefresh { Get-PPToken }
-                        if ($detailConn -and $detailConn.properties) {
-                            $baseUrl = Get-ConnectionBaseUrl $detailConn.properties
-                            $conn = $detailConn  # use the detailed version for debug output
-                        }
-                    } catch {
-                        # Non-admin fetch may fail for other users' connections — that's OK
-                    }
-                }
-
-                if ($connName -and $baseUrl -ne '') {
-                    $connBaseUrls[$connName] = $baseUrl
-                }
-
-                # Debug: dump every HTTP connection
-                try {
-                    $cJson = $conn | ConvertTo-Json -Depth 12
-                    if ($cJson.Length -gt 8000) { $cJson = $cJson.Substring(0, 8000) + "...(truncated)" }
-                    "=== API=$apiId Connection=$connName BaseUrl=$baseUrl ===`n$cJson`n" | Add-Content -Path $debugConnFile -Encoding UTF8
-                } catch {}
-            }
-        }
-        Write-Host " $totalHttpConns found, $($connBaseUrls.Count) with base URLs" -ForegroundColor DarkGray -NoNewline
-    }
-    catch {
-        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="HTTP Connections"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
-        Write-Host " Warning (HTTP connections): $($_.Exception.Message)" -ForegroundColor DarkYellow
+        Write-Host " Warning (connectors/connections): $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 
     # --- TIMEOUT CHECK ---
@@ -573,14 +525,25 @@ foreach ($env in $environments) {
             Append-CsvRow "$OutputPath/Apps.csv" $row
             $totalApps++
 
-            # Extract connection references
+            # Extract connection references — resolve URLs via connector type lookup
             if ($app.properties.connectionReferences) {
                 foreach ($ref in $app.properties.connectionReferences.PSObject.Properties) {
                     $connId = $ref.Value.id -replace '.*/apis/', ''
+                    # Resolve URL: try exact connection name match first, then all URLs for this connector type
+                    $refUrl = ""
+                    $appConnName = if ($ref.Value.connectionName) { $ref.Value.connectionName }
+                                   elseif ($ref.Value.connection -and $ref.Value.connection.name) { $ref.Value.connection.name }
+                                   else { "" }
+                    if ($appConnName -and $connBaseUrls.ContainsKey($appConnName)) {
+                        $refUrl = $connBaseUrls[$appConnName]
+                    }
+                    elseif ($connId -and $envConnByType.ContainsKey($connId)) {
+                        $refUrl = $envConnByType[$connId] -join "; "
+                    }
                     Append-CsvRow "$OutputPath/AppConnectorRefs.csv" ([PSCustomObject]@{
                         AppId=$app.name; EnvironmentId=$envId; ConnectorId=$connId
                         DisplayName=$ref.Value.displayName; DataSources=($ref.Value.dataSources -join "; ")
-                        EndpointUrl=""
+                        EndpointUrl=$refUrl
                     })
                     $totalAppConnRefs++
                 }
@@ -961,8 +924,13 @@ foreach ($env in $environments) {
                     $crConnName = if ($ref.Value.PSObject.Properties.Name -contains 'connectionName') { $ref.Value.connectionName }
                                   else { "" }
 
-                    # Look up base URL from connections cache (populated from per-API fetch above)
-                    $crBaseUrl = if ($crConnName -and $connBaseUrls.ContainsKey($crConnName)) { $connBaseUrls[$crConnName] } else { "" }
+                    # Resolve URL from environment connections lookup
+                    $crBaseUrl = ""
+                    if ($crConnName -and $connBaseUrls.ContainsKey($crConnName)) {
+                        $crBaseUrl = $connBaseUrls[$crConnName]
+                    } elseif ($crConnId -and $envConnByType.ContainsKey($crConnId)) {
+                        $crBaseUrl = $envConnByType[$crConnId] -join "; "
+                    }
 
                     Append-CsvRow "$OutputPath/FlowConnectionRefs.csv" ([PSCustomObject]@{
                         FlowKey=$flowKey; FlowId=$f.name; EnvironmentId=$envId; ConnectorId=$crConnId; ConnectionName=$crConnName; ConnectionUrl=$crBaseUrl
@@ -1079,7 +1047,7 @@ foreach ($env in $environments) {
     [void]$completedEnvs.Add($envId)
 }
 
-Write-Host "  Totals: $totalApps apps, $totalFlows flows, $totalConnectors connectors" -ForegroundColor Gray
+Write-Host "  Totals: $totalApps apps, $totalFlows flows, $totalConnectors connectors, $totalConnections connections" -ForegroundColor Gray
 Write-Host "  Totals: $totalAppConnRefs app-connector refs, $totalFlowConnRefs flow-connector refs, $totalTriggers triggers, $totalActions actions" -ForegroundColor Gray
 
 # ============================================================================
@@ -1276,6 +1244,7 @@ Write-Host "  3. Or Get Data > Text/CSV for individual files" -ForegroundColor G
 Write-Host "  4. Create relationships:" -ForegroundColor Gray
 Write-Host "     - Apps.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
 Write-Host "     - Flows.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
+Write-Host "     - Connections.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
 Write-Host "     - AppConnectorRefs.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
 Write-Host "     - FlowActions.FlowKey -> Flows.FlowKey" -ForegroundColor Gray
 Write-Host "     - FlowTriggers.FlowKey -> Flows.FlowKey" -ForegroundColor Gray
