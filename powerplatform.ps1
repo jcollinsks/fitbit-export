@@ -822,6 +822,46 @@ foreach ($env in $environments) {
                 return ""
             }
 
+            # --- Helper: extract base URL from step input parameters ---
+            # Many connectors store the base URL (site, server, host) separately from the
+            # relative endpoint path. E.g. SharePoint: dataset = site URL, uri = relative path.
+            # HTTP with Azure AD: baseResourceUrl in connection, uri = relative path.
+            function Get-StepBaseUrl {
+                param($Inputs)
+                if (-not $Inputs) { return "" }
+                if ($Inputs -is [string] -or $Inputs -is [int] -or $Inputs -is [bool] -or
+                    $null -eq $Inputs.PSObject) { return "" }
+
+                $params = $null
+                if ($Inputs.PSObject.Properties.Name -contains 'parameters') { $params = $Inputs.parameters }
+                if (-not $params -or $null -eq $params.PSObject -or ($params -is [string])) { return "" }
+
+                # Check well-known base URL parameter names (these hold the host/site, not the endpoint path)
+                foreach ($key in @('dataset', 'server', 'siteUrl', 'token:siteUrl', 'serviceUrl',
+                                   'baseUrl', 'baseResourceUrl', 'token:baseResourceUrl', 'resourceUrl',
+                                   'hostname', 'hostName', 'endpoint', 'workflowEndpoint', 'gateway')) {
+                    if ($params.PSObject.Properties.Name -contains $key) {
+                        $v = "$($params.$key)"
+                        if ($v -and $v -ne '') {
+                            # For server+database combo (SQL), append database
+                            if ($key -eq 'server' -and $params.PSObject.Properties.Name -contains 'database') {
+                                $db = "$($params.database)"
+                                if ($db -and $db -ne '') { $v = "$v/$db" }
+                            }
+                            return $v
+                        }
+                    }
+                }
+                # Check slash-prefixed keys (Power Automate convention)
+                foreach ($p in $params.PSObject.Properties) {
+                    if ($p.Name -match '/dataset$|/siteUrl$|/server$|/baseUrl$|/serviceUrl$|/baseResourceUrl$') {
+                        $v = "$($p.Value)"
+                        if ($v -and $v -ne '') { return $v }
+                    }
+                }
+                return ""
+            }
+
             # --- Helper: extract host info (connectorId, operationId, connectionName) from step inputs ---
             function Get-StepHostInfo {
                 param($Inputs)
@@ -860,12 +900,11 @@ foreach ($env in $environments) {
                     $hostInfo = Get-StepHostInfo $inputs
                     $epUrl = Get-StepEndpointUrl $inputs
 
-                    # Look up base URL from the connection used by this action
-                    $baseUrl = ""
-                    if ($BaseUrls -and $hostInfo.ConnectionName -and $BaseUrls.ContainsKey($hostInfo.ConnectionName)) {
+                    # Extract base URL: 1) from action parameters, 2) from connection lookup, 3) from endpoint URL
+                    $baseUrl = Get-StepBaseUrl $inputs
+                    if ($baseUrl -eq '' -and $BaseUrls -and $hostInfo.ConnectionName -and $BaseUrls.ContainsKey($hostInfo.ConnectionName)) {
                         $baseUrl = $BaseUrls[$hostInfo.ConnectionName]
                     }
-                    # Fallback: derive base URL (scheme + host) from the endpoint URL
                     if ($baseUrl -eq '' -and $epUrl -match '^(https?://[^/]+)') {
                         $baseUrl = $matches[1]
                     }
@@ -968,11 +1007,11 @@ foreach ($env in $environments) {
                         $inputs = if ($trig.PSObject.Properties.Name -contains 'inputs') { $trig.inputs } else { $null }
                         $hostInfo = Get-StepHostInfo $inputs
                         $epUrl = Get-StepEndpointUrl $inputs
-                        $baseUrl = ""
-                        if ($hostInfo.ConnectionName -and $connBaseUrls.ContainsKey($hostInfo.ConnectionName)) {
+                        # Extract base URL: 1) from trigger parameters, 2) from connection lookup, 3) from endpoint URL
+                        $baseUrl = Get-StepBaseUrl $inputs
+                        if ($baseUrl -eq '' -and $hostInfo.ConnectionName -and $connBaseUrls.ContainsKey($hostInfo.ConnectionName)) {
                             $baseUrl = $connBaseUrls[$hostInfo.ConnectionName]
                         }
-                        # Fallback: derive base URL (scheme + host) from the endpoint URL
                         if ($baseUrl -eq '' -and $epUrl -match '^(https?://[^/]+)') {
                             $baseUrl = $matches[1]
                         }
