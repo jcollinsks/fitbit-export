@@ -785,6 +785,7 @@ $tFlowActions = [ordered]@{
         @{Name="BaseUrl"; Type="type text"}
     ) -PreTransformSteps @(
         '    EnsureFlowKey = if Table.HasColumns(Headers, "FlowKey") then Headers else Table.AddColumn(Headers, "FlowKey", each [FlowId] & "|" & [EnvironmentId]),'
+        '    EnsureBaseUrl = if Table.HasColumns(EnsureFlowKey, "BaseUrl") then EnsureFlowKey else Table.AddColumn(EnsureFlowKey, "BaseUrl", each ""),'
     )))
     measures = @(
         (New-MeasureDef "Total Flow Actions" "COUNTROWS('FlowActions')")
@@ -820,6 +821,7 @@ $tFlowTriggers = [ordered]@{
         @{Name="BaseUrl"; Type="type text"}
     ) -PreTransformSteps @(
         '    EnsureFlowKey = if Table.HasColumns(Headers, "FlowKey") then Headers else Table.AddColumn(Headers, "FlowKey", each [FlowId] & "|" & [EnvironmentId]),'
+        '    EnsureBaseUrl = if Table.HasColumns(EnsureFlowKey, "BaseUrl") then EnsureFlowKey else Table.AddColumn(EnsureFlowKey, "BaseUrl", each ""),'
     )))
     measures = @(
         (New-MeasureDef "Total Flow Triggers" "COUNTROWS('FlowTriggers')")
