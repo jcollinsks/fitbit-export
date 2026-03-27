@@ -79,26 +79,34 @@ function New-MeasureDef {
 }
 
 function New-CsvPartition {
-    param([string]$TableName, [hashtable[]]$TypeMappings)
+    param([string]$TableName, [hashtable[]]$TypeMappings, [string[]]$PreTransformSteps)
     $typeLines = ($TypeMappings | ForEach-Object {
         "        {`"$($_.Name)`", $($_.Type)}"
     }) -join ",`n"
 
-    $mExpr = @(
-        "let"
-        "    Source = Csv.Document(File.Contents(CsvFolderPath & `"$TableName.csv`"), [Delimiter=`",`", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),"
-        "    Headers = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),"
-        "    Typed = Table.TransformColumnTypes(Headers, {"
-        $typeLines
-        "    })"
-        "in"
-        "    Typed"
-    )
+    $mExpr = [System.Collections.Generic.List[string]]::new()
+    $mExpr.Add("let")
+    $mExpr.Add("    Source = Csv.Document(File.Contents(CsvFolderPath & `"$TableName.csv`"), [Delimiter=`",`", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),")
+    $mExpr.Add("    Headers = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),")
+
+    $typedInput = "Headers"
+    if ($PreTransformSteps -and $PreTransformSteps.Count -gt 0) {
+        foreach ($step in $PreTransformSteps) { $mExpr.Add($step) }
+        # Last pre-transform step name is extracted from the step text (e.g. "    StepName = ..." -> "StepName")
+        $lastStep = $PreTransformSteps[-1] -replace '^\s+(\w+)\s*=.*', '$1'
+        $typedInput = $lastStep
+    }
+
+    $mExpr.Add("    Typed = Table.TransformColumnTypes($typedInput, {")
+    $mExpr.Add($typeLines)
+    $mExpr.Add("    })")
+    $mExpr.Add("in")
+    $mExpr.Add("    Typed")
 
     [ordered]@{
         name = "$TableName-Partition"
         mode = "import"
-        source = [ordered]@{ type = "m"; expression = $mExpr }
+        source = [ordered]@{ type = "m"; expression = [string[]]$mExpr }
     }
 }
 
@@ -599,6 +607,8 @@ $tFlows = [ordered]@{
         @{Name="TriggerType"; Type="type text"}, @{Name="IsSolutionAware"; Type="type logical"},
         @{Name="SolutionId"; Type="type text"}, @{Name="IsManaged"; Type="type logical"},
         @{Name="SuspensionReason"; Type="type text"}, @{Name="CollectedAt"; Type="type datetime"}
+    ) -PreTransformSteps @(
+        '    EnsureFlowKey = if Table.HasColumns(Headers, "FlowKey") then Headers else Table.AddColumn(Headers, "FlowKey", each [FlowId] & "|" & [EnvironmentId]),'
     )))
     measures = @(
         (New-MeasureDef "Total Flows" "COUNTROWS('Flows')")
@@ -773,6 +783,8 @@ $tFlowActions = [ordered]@{
         @{Name="ActionType"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
         @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"},
         @{Name="BaseUrl"; Type="type text"}
+    ) -PreTransformSteps @(
+        '    EnsureFlowKey = if Table.HasColumns(Headers, "FlowKey") then Headers else Table.AddColumn(Headers, "FlowKey", each [FlowId] & "|" & [EnvironmentId]),'
     )))
     measures = @(
         (New-MeasureDef "Total Flow Actions" "COUNTROWS('FlowActions')")
@@ -806,6 +818,8 @@ $tFlowTriggers = [ordered]@{
         @{Name="TriggerType"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
         @{Name="OperationId"; Type="type text"}, @{Name="EndpointUrl"; Type="type text"},
         @{Name="BaseUrl"; Type="type text"}
+    ) -PreTransformSteps @(
+        '    EnsureFlowKey = if Table.HasColumns(Headers, "FlowKey") then Headers else Table.AddColumn(Headers, "FlowKey", each [FlowId] & "|" & [EnvironmentId]),'
     )))
     measures = @(
         (New-MeasureDef "Total Flow Triggers" "COUNTROWS('FlowTriggers')")
@@ -829,6 +843,8 @@ $tFlowConnRefs = [ordered]@{
         @{Name="EnvironmentId"; Type="type text"},
         @{Name="ConnectorId"; Type="type text"}, @{Name="ConnectionName"; Type="type text"},
         @{Name="ConnectionUrl"; Type="type text"}
+    ) -PreTransformSteps @(
+        '    EnsureFlowKey = if Table.HasColumns(Headers, "FlowKey") then Headers else Table.AddColumn(Headers, "FlowKey", each [FlowId] & "|" & [EnvironmentId]),'
     )))
     measures = @(
         (New-MeasureDef "Total Flow Connections" "COUNTROWS('FlowConnectionRefs')")
