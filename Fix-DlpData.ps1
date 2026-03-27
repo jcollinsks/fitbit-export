@@ -182,9 +182,9 @@ foreach ($ep in $endpoints) {
         $policies = Invoke-ApiPaged -Uri $ep.Uri -Token $token
         $newCount = 0
         foreach ($p in $policies) {
-            $pid = $p.name
-            if (-not $policySourceMap.ContainsKey($pid)) {
-                $policySourceMap[$pid] = $ep.Name
+            $polId = $p.name
+            if (-not $policySourceMap.ContainsKey($polId)) {
+                $policySourceMap[$polId] = $ep.Name
                 $allPoliciesRaw.Add($p)
                 $newCount++
             }
