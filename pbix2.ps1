@@ -33,6 +33,18 @@ $ErrorActionPreference = "Stop"
 # Resolve to absolute path with trailing backslash
 $CsvPath = (Resolve-Path $CsvPath).Path.TrimEnd('\') + '\'
 
+# Validate CSV files exist
+$requiredCsvs = @("Environments.csv", "Apps.csv", "Flows.csv", "Connectors.csv", "Connections.csv")
+$missingCsvs = $requiredCsvs | Where-Object { -not (Test-Path (Join-Path $CsvPath $_)) }
+if ($missingCsvs.Count -gt 0) {
+    Write-Host "ERROR: Missing required CSV files in $CsvPath" -ForegroundColor Red
+    $missingCsvs | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "Run powerplatform.ps1 first to collect data, then point -CsvPath to the output folder." -ForegroundColor Yellow
+    exit 1
+}
+Write-Host "CSV source: $CsvPath" -ForegroundColor Cyan
+
 # ============================================================================
 # HELPERS (copied from pbix.ps1)
 # ============================================================================
@@ -442,9 +454,19 @@ $reportDir = "$OutputPath/$projectName.Report"
 $modelDir = "$OutputPath/$projectName.SemanticModel"
 
 Write-Host "Cleaning old output..." -ForegroundColor Yellow
-Get-ChildItem -Path $OutputPath -Directory -Filter "*.Report" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-Get-ChildItem -Path $OutputPath -Directory -Filter "*.SemanticModel" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-Get-ChildItem -Path $OutputPath -Directory -Filter ".pbi" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+# Resolve output path — create if it doesn't exist
+if (-not (Test-Path $OutputPath)) {
+    New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+    Write-Host "  Created output directory: $OutputPath" -ForegroundColor DarkGray
+}
+$OutputPath = (Resolve-Path $OutputPath).Path
+try {
+    Get-ChildItem -Path $OutputPath -Directory -Filter "*.Report" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $OutputPath -Directory -Filter "*.SemanticModel" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $OutputPath -Directory -Filter ".pbi" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+} catch {
+    Write-Host "  Warning: Could not fully clean old output — $($_.Exception.Message)" -ForegroundColor DarkYellow
+}
 
 Write-Host "Creating PBIP project at: $OutputPath" -ForegroundColor Cyan
 
