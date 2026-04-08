@@ -255,7 +255,54 @@ function Invoke-PPApiPaged {
     }
     return $all
 }
+# --- NEW RECURSIVE FUNCTION FOR NESTED ACTIONS ---
+function Get-FlowActionsRecursive {
+    param ($Actions, $FlowKey, $FlowId, $EnvId)
+    $results = @()
+    if ($null -eq $Actions) { return $results }
 
+    foreach ($name in $Actions.psobject.properties.name) {
+        $action = $Actions.$name
+        
+        # 1. Capture the Action data
+        $uri = $null
+        if ($action.inputs.uri) { $uri = $action.inputs.uri }
+        elseif ($action.inputs.host.apiId) { $uri = $action.inputs.host.apiId }
+        elseif ($action.inputs.parameters.dataset) { $uri = $action.inputs.parameters.dataset }
+
+        $results += [PSCustomObject]@{
+            FlowKey     = $FlowKey
+            FlowId      = $FlowId
+            EnvironmentId = $EnvId
+            Position    = 0 # Placeholder for sorting
+            Name        = $name
+            ActionType  = $action.type
+            ConnectorId = $action.inputs.host.connectionReferenceKey
+            OperationId = $action.metadata.operationMetadataId
+            EndpointUrl = $uri
+            BaseUrl     = $action.inputs.host.basePath
+        }
+
+        # 2. Recursively check for nested actions (Scopes, Conditions, Loops)
+        if ($action.actions) { 
+            $results += Get-FlowActionsRecursive -Actions $action.actions -FlowKey $FlowKey -FlowId $FlowId -EnvId $EnvId 
+        }
+        if ($action.else.actions) { 
+            $results += Get-FlowActionsRecursive -Actions $action.else.actions -FlowKey $FlowKey -FlowId $FlowId -EnvId $EnvId 
+        }
+        if ($action.cases) {
+            foreach ($caseName in $action.cases.psobject.properties.name) {
+                if ($action.cases.$caseName.actions) {
+                    $results += Get-FlowActionsRecursive -Actions $action.cases.$caseName.actions -FlowKey $FlowKey -FlowId $FlowId -EnvId $EnvId
+                }
+            }
+        }
+        if ($action.default.actions) {
+            $results += Get-FlowActionsRecursive -Actions $action.default.actions -FlowKey $FlowKey -FlowId $FlowId -EnvId $EnvId
+        }
+    }
+    return $results
+}
 # ============================================================================
 # CSV STREAMING HELPERS — append rows without holding everything in memory
 # ============================================================================
@@ -1097,10 +1144,12 @@ foreach ($env in $environments) {
                     }
 
                     if ($flowDefinition.PSObject.Properties.Name -contains 'actions' -and $flowDefinition.actions) {
-                        $actionPos = [ref]0
-                        $actionCount = [ref]0
-                        Write-FlattenedActions $flowDefinition.actions $flowKey $f.name $envId $OutputPath $actionPos $actionCount $connBaseUrls
-                        $totalActions += $actionCount.Value
+                        # Step B: Use the new recursive function to capture all nested endpoints
+                        $allExtractedActions = Get-FlowActionsRecursive -Actions $flowDefinition.actions -FlowKey $flowKey -FlowId $f.name -EnvId $envId
+                        
+                        # Write the results to the CSV
+                        Append-CsvRows -Path "$OutputPath/FlowActions.csv" -Rows $allExtractedActions
+                        $totalActions += $allExtractedActions.Count
                     }
                 }
 
