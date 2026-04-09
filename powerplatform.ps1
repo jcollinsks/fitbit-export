@@ -212,7 +212,7 @@ function Invoke-DataverseOData {
         }
         catch {
             $status = 0; try { $status = $_.Exception.Response.StatusCode.value__ } catch {}
-            if ($status -eq 401 -or $status -eq 403 -or $status -eq 404) { return $all }
+            if ($status -eq 400 -or $status -eq 401 -or $status -eq 403 -or $status -eq 404) { return $all }
             if ($page -eq 1) { throw }  # First page failure is fatal
             break  # Partial results on later pages
         }
@@ -1359,13 +1359,24 @@ foreach ($env in $environments) {
                 }
 
                 # Fetch all bots in this environment
+                # Use lookup _value fields + formatted value annotations instead of $expand
+                # Try full field list first; fall back to core fields if 400 (schema varies by version)
                 $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
                     'bots?$select=botid,name,schemaname,language,authenticationmode,authenticationtrigger,' +
                     'accesscontrolpolicy,runtimeprovider,supportedlanguages,configuration,' +
-                    'statecode,statuscode,publishedon,origin,template,ismanaged,_solutionid_value,' +
-                    'createdon,modifiedon' +
-                    '&$expand=publishedby($select=fullname),createdby($select=fullname),modifiedby($select=fullname)'
+                    'statecode,statuscode,publishedon,_publishedby_value,' +
+                    'origin,template,ismanaged,_solutionid_value,' +
+                    'createdon,_createdby_value,modifiedon,_modifiedby_value'
                 )
+                if ($bots.Count -eq 0) {
+                    # Fallback: core fields only (newer fields may not exist in older schema)
+                    $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
+                        'bots?$select=botid,name,schemaname,language,authenticationmode,' +
+                        'accesscontrolpolicy,statecode,statuscode,publishedon,_publishedby_value,' +
+                        'origin,template,ismanaged,_solutionid_value,' +
+                        'createdon,_createdby_value,modifiedon,_modifiedby_value'
+                    )
+                }
                 $envAgentCount = 0
                 $allComponents = @()
 
@@ -1452,16 +1463,25 @@ foreach ($env in $environments) {
                             State = $stateLabel
                             StatusReason = $statusLabel
                             PublishedOn = "$($bot.publishedon)"
-                            PublishedByName = if ($bot.publishedby) { "$($bot.publishedby.fullname)" } else { "" }
+                            PublishedByName = $(
+                                $fvPub = "_publishedby_value@$fv"; $v = "$($bot.$fvPub)"
+                                if ($v) { $v } else { "" }
+                            )
                             Origin = "$($bot.origin)"
                             Template = "$($bot.template)"
                             IsManaged = "$($bot.ismanaged)"
                             SolutionId = "$($bot._solutionid_value)"
                             Configuration = $configVal
                             CreatedOn = "$($bot.createdon)"
-                            CreatedByName = if ($bot.createdby) { "$($bot.createdby.fullname)" } else { "" }
+                            CreatedByName = $(
+                                $fvCre = "_createdby_value@$fv"; $v = "$($bot.$fvCre)"
+                                if ($v) { $v } else { "" }
+                            )
                             ModifiedOn = "$($bot.modifiedon)"
-                            ModifiedByName = if ($bot.modifiedby) { "$($bot.modifiedby.fullname)" } else { "" }
+                            ModifiedByName = $(
+                                $fvMod = "_modifiedby_value@$fv"; $v = "$($bot.$fvMod)"
+                                if ($v) { $v } else { "" }
+                            )
                             TopicCount = $topicCount
                             KnowledgeSourceCount = $knowledgeCount
                             SkillCount = $skillCount
