@@ -212,7 +212,7 @@ function Invoke-DataverseOData {
         }
         catch {
             $status = 0; try { $status = $_.Exception.Response.StatusCode.value__ } catch {}
-            if ($status -eq 400 -or $status -eq 401 -or $status -eq 403 -or $status -eq 404) { return $all }
+            if ($status -eq 401 -or $status -eq 403 -or $status -eq 404) { return $all }
             if ($page -eq 1) { throw }  # First page failure is fatal
             break  # Partial results on later pages
         }
@@ -1360,23 +1360,39 @@ foreach ($env in $environments) {
 
                 # Fetch all bots in this environment
                 # Use lookup _value fields + formatted value annotations instead of $expand
-                # Try full field list first; fall back to core fields if 400 (schema varies by version)
-                $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
-                    'bots?$select=botid,name,schemaname,language,authenticationmode,authenticationtrigger,' +
-                    'accesscontrolpolicy,runtimeprovider,supportedlanguages,configuration,' +
-                    'statecode,statuscode,publishedon,_publishedby_value,' +
-                    'origin,template,ismanaged,_solutionid_value,' +
-                    'createdon,_createdby_value,modifiedon,_modifiedby_value'
-                )
-                if ($bots.Count -eq 0) {
-                    # Fallback: core fields only (newer fields may not exist in older schema)
+                # Try full field list first; fall back to core fields on error (schema varies)
+                $bots = $null
+                $botQueryError = $null
+                try {
                     $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
-                        'bots?$select=botid,name,schemaname,language,authenticationmode,' +
-                        'accesscontrolpolicy,statecode,statuscode,publishedon,_publishedby_value,' +
+                        'bots?$select=botid,name,schemaname,language,authenticationmode,authenticationtrigger,' +
+                        'accesscontrolpolicy,runtimeprovider,supportedlanguages,configuration,' +
+                        'statecode,statuscode,publishedon,_publishedby_value,' +
                         'origin,template,ismanaged,_solutionid_value,' +
                         'createdon,_createdby_value,modifiedon,_modifiedby_value'
                     )
                 }
+                catch {
+                    $botQueryError = $_.Exception.Message
+                    # Fallback: core fields only (newer fields may not exist)
+                    try {
+                        $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
+                            'bots?$select=botid,name,schemaname,language,authenticationmode,' +
+                            'accesscontrolpolicy,statecode,statuscode,publishedon,_publishedby_value,' +
+                            'origin,template,ismanaged,_solutionid_value,' +
+                            'createdon,_createdby_value,modifiedon,_modifiedby_value'
+                        )
+                        if ($bots.Count -gt 0) {
+                            Write-Host " (core-fields-only)" -ForegroundColor DarkGray -NoNewline
+                        }
+                    }
+                    catch {
+                        # Bot entity likely doesn't exist in this environment
+                        $bots = @()
+                        Write-Host " (no bot entity: $($_.Exception.Message))" -ForegroundColor DarkYellow -NoNewline
+                    }
+                }
+                if (-not $bots) { $bots = @() }
                 $envAgentCount = 0
                 $allComponents = @()
 
@@ -1522,7 +1538,11 @@ foreach ($env in $environments) {
                         }
                     }
                 }
-                Write-Host " $envAgentCount agents, $($allComponents.Count) components" -ForegroundColor DarkGray
+                if ($botQueryError -and $bots.Count -eq 0) {
+                    Write-Host " query error: $botQueryError" -ForegroundColor DarkYellow
+                } else {
+                    Write-Host " $envAgentCount agents, $($allComponents.Count) components" -ForegroundColor DarkGray
+                }
             }
             else {
                 Write-Host " skipped (no Dataverse token)" -ForegroundColor DarkGray
