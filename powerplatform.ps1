@@ -3,8 +3,8 @@
     Collects Power Platform inventory data for Power BI dashboards.
 .DESCRIPTION
     Pulls environments, apps, flows, connectors, connections, DLP policies,
-    and usage analytics from Power Platform admin APIs. Outputs CSV files
-    ready for Power BI import.
+    usage analytics, and Copilot Studio agents from Power Platform admin APIs
+    and Dataverse OData. Outputs CSV files ready for Power BI import.
 
     Designed for large tenants (1000+ environments, 40K+ apps, 60K+ flows):
     - Parallel flow definition fetching via runspace pool (10 concurrent by default)
@@ -164,6 +164,56 @@ function Reset-AllTokens {
     $script:ppTokenExpiry = [datetime]::MinValue
     $script:flowTokenExpiry = [datetime]::MinValue
     $script:adminTokenExpiry = [datetime]::MinValue
+}
+
+# --- Dataverse OData token (per-environment, cached by OrgUrl) ---
+$script:dvTokens = @{}
+function Get-DataverseToken {
+    param([string]$OrgUrl)
+    $resource = $OrgUrl.TrimEnd('/')
+    $cached = $script:dvTokens[$resource]
+    if ($cached -and [datetime]::UtcNow -lt $cached.Expiry) { return $cached.Token }
+    try {
+        $result = Get-AzAccessToken -ResourceUrl $resource -AsSecureString
+        $token = Get-TokenString $result.Token
+        $script:dvTokens[$resource] = @{ Token = $token; Expiry = [datetime]::UtcNow.AddMinutes(20) }
+        return $token
+    }
+    catch {
+        return $null
+    }
+}
+
+function Invoke-DataverseOData {
+    param([string]$OrgUrl, [string]$Query, [string]$Token, [int]$MaxPages = 100)
+    $all = [System.Collections.Generic.List[object]]::new()
+    $baseUri = "$($OrgUrl.TrimEnd('/'))/api/data/v9.2/"
+    $uri = "$baseUri$Query"
+    $page = 0
+    while ($uri) {
+        $page++
+        if ($page -gt $MaxPages) { break }
+        try {
+            $response = Invoke-RestMethod -Uri $uri -Method Get -Headers @{
+                "Authorization" = "Bearer $Token"
+                "Accept" = "application/json"
+                "OData-MaxVersion" = "4.0"
+                "OData-Version" = "4.0"
+                "Prefer" = 'odata.include-annotations="OData.Community.Display.V1.FormattedValue",odata.maxpagesize=5000'
+            } -TimeoutSec 60
+        }
+        catch {
+            $status = 0; try { $status = $_.Exception.Response.StatusCode.value__ } catch {}
+            if ($status -eq 401 -or $status -eq 403 -or $status -eq 404) { return $all }
+            if ($page -eq 1) { throw }  # First page failure is fatal
+            break  # Partial results on later pages
+        }
+        if ($response.value -and $response.value.Count -gt 0) {
+            $all.AddRange([object[]]$response.value)
+        } else { break }
+        $uri = $response.'@odata.nextLink'
+    }
+    return $all
 }
 
 # ============================================================================
@@ -421,12 +471,15 @@ else {
     Initialize-Csv "$OutputPath/FlowConnectionRefs.csv" @("FlowKey","FlowId","EnvironmentId","ConnectorId","ConnectionName","ConnectionUrl")
     Initialize-Csv "$OutputPath/Connectors.csv" @("ConnectorId","EnvironmentId","EnvironmentName","DisplayName","Description","Publisher","Tier","IsCustom","IconUri","CollectedAt")
     Initialize-Csv "$OutputPath/Connections.csv" @("ConnectionId","ConnectorId","EnvironmentId","EnvironmentName","DisplayName","ConnectionUrl","CreatedByObjectId","CreatedByName","CreatedByEmail","CreatedTime","Status","IsShared","CollectedAt")
+    Initialize-Csv "$OutputPath/CopilotAgents.csv" @("BotId","EnvironmentId","EnvironmentName","DisplayName","SchemaName","AgentType","Language","AuthenticationMode","AuthenticationTrigger","AccessControlPolicy","RuntimeProvider","SupportedLanguages","State","StatusReason","PublishedOn","PublishedByName","Origin","Template","IsManaged","SolutionId","Configuration","CreatedOn","CreatedByName","ModifiedOn","ModifiedByName","TopicCount","KnowledgeSourceCount","SkillCount","CustomGPTCount","TotalComponents","CollectedAt")
+    Initialize-Csv "$OutputPath/CopilotComponents.csv" @("ComponentId","BotId","BotName","EnvironmentId","EnvironmentName","Name","ComponentType","Category","Description","Status","IsManaged","CreatedOn","ModifiedOn","CollectedAt")
     # Clear checkpoint for fresh run
     if (Test-Path $checkpointFile) { Remove-Item $checkpointFile }
 }
 
 $totalApps = 0; $totalFlows = 0; $totalConnectors = 0; $totalConnections = 0
 $totalAppConnRefs = 0; $totalTriggers = 0; $totalActions = 0; $totalFlowConnRefs = 0
+$totalAgents = 0; $totalAgentComponents = 0
 $envCount = $environments.Count
 $envIndex = 0
 
@@ -527,6 +580,10 @@ foreach ($env in $environments) {
                     elseif ($vals.resourceUrl.value) { $connUrl = $vals.resourceUrl.value }
                 }
             }
+            # Fallback: derive Dataverse URL from environment OrgUrl
+            if (-not $connUrl -and $connId -match 'commondataservice' -and $env.OrgUrl -and "$($env.OrgUrl)" -ne '') {
+                $connUrl = "$($env.OrgUrl)".TrimEnd('/')
+            }
 
             # Build lookups for cross-referencing with apps and flows
             if ($connUrl) {
@@ -552,19 +609,47 @@ foreach ($env in $environments) {
         }
         Write-Host " $envConnCount ($($connBaseUrls.Count) with URLs)" -ForegroundColor DarkGray -NoNewline
 
-        # --- Pass 2: Non-admin endpoint for HTTP connections to get connectionParameters ---
-        # The admin endpoint strips connectionParameters. For HTTP-type connectors, the base URL
-        # (e.g. baseResourceUrl) is ONLY in connectionParameters. Try the non-admin endpoint
-        # which returns full details for connections the caller can access.
-        $httpConnections = @($connections | Where-Object {
-            $cId = $_.properties.apiId -replace '.*/apis/', ''
-            $cId -match 'sendhttp|webcontents|httpwithazuread|httpwebhook'
-        } | Where-Object { -not $connBaseUrls.ContainsKey($_.name) })
+        # --- Derive Dataverse URLs from environment OrgUrl ---
+        # Admin API strips connectionParameters, but for Dataverse the URL is always the env OrgUrl
+        $dataverseResolved = 0
+        if ($env.OrgUrl -and "$($env.OrgUrl)" -ne '') {
+            $orgUrl = "$($env.OrgUrl)".TrimEnd('/')
+            foreach ($c in $connections) {
+                $cId = $c.properties.apiId -replace '.*/apis/', ''
+                if ($cId -match 'commondataservice' -and -not $connBaseUrls.ContainsKey($c.name)) {
+                    $connBaseUrls[$c.name] = $orgUrl
+                    $dataverseResolved++
+                    if (-not $envConnByType.ContainsKey($cId)) {
+                        $envConnByType[$cId] = [System.Collections.Generic.List[string]]::new()
+                    }
+                    if ($envConnByType[$cId] -notcontains $orgUrl) {
+                        $envConnByType[$cId].Add($orgUrl)
+                    }
+                }
+            }
+            if ($dataverseResolved -gt 0) {
+                Write-Host " Dataverse:$dataverseResolved→$orgUrl" -ForegroundColor DarkGray -NoNewline
+            }
+        }
 
-        if ($httpConnections.Count -gt 0) {
-            Write-Host " HTTP detail..." -ForegroundColor DarkGray -NoNewline
-            $httpResolved = 0
-            foreach ($hc in $httpConnections) {
+        # --- Pass 2: Non-admin endpoint for connections to get connectionParameters ---
+        # The admin endpoint strips connectionParameters. The non-admin endpoint returns
+        # full details (including base URLs) for connections the caller can access.
+        # Try connectors that typically have user-configurable URLs.
+        $urlConnections = @($connections | Where-Object {
+            -not $connBaseUrls.ContainsKey($_.name)
+        } | Where-Object {
+            $cId = $_.properties.apiId -replace '.*/apis/', ''
+            $cId -match 'sendhttp|webcontents|httpwithazuread|httpwebhook|sharepointonline|sql|azuresql|azureblob|azurequeues|azuretables|azurefile|documentdb|dynamicscrmonline'
+        })
+
+        if ($urlConnections.Count -gt 0) {
+            # Cap at 200 to avoid excessive API calls (non-admin endpoint fails for others' connections)
+            $maxPass2 = [math]::Min($urlConnections.Count, 200)
+            $urlConnections = @($urlConnections | Select-Object -First $maxPass2)
+            Write-Host " Conn detail ($($urlConnections.Count))..." -ForegroundColor DarkGray -NoNewline
+            $pass2Resolved = 0
+            foreach ($hc in $urlConnections) {
                 $hcApiId = $hc.properties.apiId -replace '.*/apis/', ''
                 $hcName = $hc.name
                 try {
@@ -577,10 +662,18 @@ foreach ($env in $environments) {
                         $hcUrl = ""
                         if ($cp) {
                             foreach ($k in @('baseResourceUrl', 'token:baseResourceUrl', 'baseUrl', 'resourceUrl',
-                                             'serviceUrl', 'url', 'siteUrl', 'token:siteUrl')) {
+                                             'serviceUrl', 'url', 'siteUrl', 'token:siteUrl', 'server',
+                                             'dataset', 'endpoint', 'gateway')) {
                                 if ($cp.PSObject.Properties.Name -contains $k) {
                                     $v = "$($cp.$k)"
-                                    if ($v -match '^https?://') { $hcUrl = $v; break }
+                                    if ($v -and $v -ne '') {
+                                        # For server+database, combine them
+                                        if ($k -eq 'server' -and $cp.PSObject.Properties.Name -contains 'database') {
+                                            $db = "$($cp.database)"
+                                            if ($db -and $db -ne '') { $v = "$v/$db" }
+                                        }
+                                        $hcUrl = $v; break
+                                    }
                                 }
                             }
                             if (-not $hcUrl) {
@@ -595,7 +688,14 @@ foreach ($env in $environments) {
                         }
                         if ($hcUrl) {
                             $connBaseUrls[$hcName] = $hcUrl
-                            $httpResolved++
+                            $hcConnId = $hcApiId -replace '.*/apis/', ''
+                            if (-not $envConnByType.ContainsKey($hcConnId)) {
+                                $envConnByType[$hcConnId] = [System.Collections.Generic.List[string]]::new()
+                            }
+                            if ($envConnByType[$hcConnId] -notcontains $hcUrl) {
+                                $envConnByType[$hcConnId].Add($hcUrl)
+                            }
+                            $pass2Resolved++
                         }
                     }
                 }
@@ -603,7 +703,7 @@ foreach ($env in $environments) {
                     # Non-admin endpoint fails for other users' connections — expected
                 }
             }
-            Write-Host " $httpResolved/$($httpConnections.Count) resolved" -ForegroundColor DarkGray -NoNewline
+            Write-Host " $pass2Resolved resolved" -ForegroundColor DarkGray -NoNewline
         }
     }
     catch {
@@ -761,7 +861,7 @@ foreach ($env in $environments) {
                         # Wait with timeout — don't block forever on hung requests
                         if ($pj.Handle.AsyncWaitHandle.WaitOne($batchTimeoutMs)) {
                             $res = $pj.PS.EndInvoke($pj.Handle)
-                            if ($res) { $flowDefCache[$pj.FlowId] = $res }
+                            if ($res -and $res.Count -gt 0) { $flowDefCache[$pj.FlowId] = $res[0] }
                         }
                         else {
                             # Job hung — kill it and move on
@@ -1019,10 +1119,13 @@ foreach ($env in $environments) {
                     $hostInfo = Get-StepHostInfo $inputs
                     $epUrl = Get-StepEndpointUrl $inputs
 
-                    # Extract base URL: 1) from action parameters, 2) from connection lookup, 3) from endpoint URL
+                    # Extract base URL: 1) from action parameters, 2) from connection lookup, 3) from connector type lookup, 4) from endpoint URL
                     $baseUrl = Get-StepBaseUrl $inputs
                     if ($baseUrl -eq '' -and $BaseUrls -and $hostInfo.ConnectionName -and $BaseUrls.ContainsKey($hostInfo.ConnectionName)) {
                         $baseUrl = $BaseUrls[$hostInfo.ConnectionName]
+                    }
+                    if ($baseUrl -eq '' -and $hostInfo.ConnectorId -and $envConnByType.ContainsKey($hostInfo.ConnectorId)) {
+                        $baseUrl = $envConnByType[$hostInfo.ConnectorId] -join "; "
                     }
                     if ($baseUrl -eq '' -and $epUrl -match '^(https?://[^/]+)') {
                         $baseUrl = $matches[1]
@@ -1126,10 +1229,13 @@ foreach ($env in $environments) {
                         $inputs = if ($trig.PSObject.Properties.Name -contains 'inputs') { $trig.inputs } else { $null }
                         $hostInfo = Get-StepHostInfo $inputs
                         $epUrl = Get-StepEndpointUrl $inputs
-                        # Extract base URL: 1) from trigger parameters, 2) from connection lookup, 3) from endpoint URL
+                        # Extract base URL: 1) from trigger parameters, 2) from connection lookup, 3) from connector type lookup, 4) from endpoint URL
                         $baseUrl = Get-StepBaseUrl $inputs
                         if ($baseUrl -eq '' -and $hostInfo.ConnectionName -and $connBaseUrls.ContainsKey($hostInfo.ConnectionName)) {
                             $baseUrl = $connBaseUrls[$hostInfo.ConnectionName]
+                        }
+                        if ($baseUrl -eq '' -and $hostInfo.ConnectorId -and $envConnByType.ContainsKey($hostInfo.ConnectorId)) {
+                            $baseUrl = $envConnByType[$hostInfo.ConnectorId] -join "; "
                         }
                         if ($baseUrl -eq '' -and $epUrl -match '^(https?://[^/]+)') {
                             $baseUrl = $matches[1]
@@ -1153,16 +1259,42 @@ foreach ($env in $environments) {
                     }
                 }
 
-                # FALLBACK: Parse from definitionSummary (no URLs, but we get connector IDs)
+                # FALLBACK: Parse from definitionSummary (no input parameters, but we can
+                # resolve BaseUrl from connection references + connBaseUrls/envConnByType)
                 if (-not $usedFullDef -and $defSummary) {
+                    # Build connector-to-URL lookup from this flow's connection references
+                    $connIdToUrl = @{}
+                    if ($connRefs) {
+                        foreach ($ref in $connRefs.PSObject.Properties) {
+                            $crConnId = ""
+                            if ($ref.Value.PSObject.Properties.Name -contains 'id') {
+                                $crConnId = $ref.Value.id -replace '.*/apis/', ''
+                            } elseif ($ref.Value.PSObject.Properties.Name -contains 'api' -and $ref.Value.api.name) {
+                                $crConnId = $ref.Value.api.name
+                            }
+                            if (-not $crConnId) { continue }
+                            $crConnName = if ($ref.Value.PSObject.Properties.Name -contains 'connectionName') { $ref.Value.connectionName } else { "" }
+                            $crUrl = ""
+                            if ($crConnName -and $connBaseUrls.ContainsKey($crConnName)) {
+                                $crUrl = $connBaseUrls[$crConnName]
+                            } elseif ($crConnId -and $envConnByType.ContainsKey($crConnId)) {
+                                $crUrl = $envConnByType[$crConnId] -join "; "
+                            }
+                            if ($crUrl -and -not $connIdToUrl.ContainsKey($crConnId)) {
+                                $connIdToUrl[$crConnId] = $crUrl
+                            }
+                        }
+                    }
+
                     if ($defSummary.triggers) {
                         $pos = 0
                         foreach ($t in $defSummary.triggers) {
                             $tConnId = if ($t.api -and $t.api.id) { $t.api.id -replace '.*/apis/', '' } else { "" }
                             if ($pos -eq 0) { $triggerType = $t.type }
+                            $tBaseUrl = if ($tConnId -and $connIdToUrl.ContainsKey($tConnId)) { $connIdToUrl[$tConnId] } else { "" }
                             Append-CsvRow "$OutputPath/FlowTriggers.csv" ([PSCustomObject]@{
                                 FlowKey=$flowKey; FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
-                                TriggerType=$t.type; ConnectorId=$tConnId; OperationId=$t.swaggerOperationId; EndpointUrl=""; BaseUrl=""
+                                TriggerType=$t.type; ConnectorId=$tConnId; OperationId=$t.swaggerOperationId; EndpointUrl=""; BaseUrl=$tBaseUrl
                             })
                             $pos++; $totalTriggers++
                         }
@@ -1171,9 +1303,10 @@ foreach ($env in $environments) {
                         $pos = 0
                         foreach ($a in $defSummary.actions) {
                             $aConnId = if ($a.api -and $a.api.id) { $a.api.id -replace '.*/apis/', '' } else { "" }
+                            $aBaseUrl = if ($aConnId -and $connIdToUrl.ContainsKey($aConnId)) { $connIdToUrl[$aConnId] } else { "" }
                             Append-CsvRow "$OutputPath/FlowActions.csv" ([PSCustomObject]@{
                                 FlowKey=$flowKey; FlowId=$f.name; EnvironmentId=$envId; Position=$pos; Name=""
-                                ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=""; BaseUrl=""
+                                ActionType=$a.type; ConnectorId=$aConnId; OperationId=$a.swaggerOperationId; EndpointUrl=""; BaseUrl=$aBaseUrl
                             })
                             $pos++; $totalActions++
                         }
@@ -1202,6 +1335,177 @@ foreach ($env in $environments) {
         Write-Host "    Warning (flows): $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 
+    # --- COPILOT STUDIO AGENTS (requires Dataverse-enabled environment) ---
+    if ($env.OrgUrl -and "$($env.OrgUrl)" -ne '') {
+        try {
+            Write-Host "    Copilot agents..." -ForegroundColor DarkGray -NoNewline
+            $dvToken = Get-DataverseToken $env.OrgUrl
+            if ($dvToken) {
+                $fv = 'OData.Community.Display.V1.FormattedValue'
+                $componentTypeLabels = @{
+                    0='Topic'; 1='Skill'; 2='Bot Variable'; 3='Bot Entity'; 4='Dialog'; 5='Trigger'
+                    6='Language Understanding'; 7='Language Generation'; 8='Dialog Schema'; 9='Topic'
+                    10='Bot Translations'; 11='Bot Entity'; 12='Bot Variable'; 13='Skill'
+                    14='File Attachment'; 15='Custom GPT'; 16='Knowledge Source'; 17='External Trigger'
+                    18='Copilot Settings'; 19='Test Case'
+                }
+
+                # Fetch all bots in this environment
+                $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
+                    'bots?$select=botid,name,schemaname,language,authenticationmode,authenticationtrigger,' +
+                    'accesscontrolpolicy,runtimeprovider,supportedlanguages,configuration,' +
+                    'statecode,statuscode,publishedon,origin,template,ismanaged,_solutionid_value,' +
+                    'createdon,modifiedon' +
+                    '&$expand=publishedby($select=fullname),createdby($select=fullname),modifiedby($select=fullname)'
+                )
+                $envAgentCount = 0
+                $allComponents = @()
+
+                if ($bots -and $bots.Count -gt 0) {
+                    # Fetch ALL botcomponents for this environment at once (more efficient than per-bot)
+                    $allComponents = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
+                        'botcomponents?$select=botcomponentid,name,componenttype,category,description,' +
+                        'statecode,ismanaged,createdon,modifiedon,_parentbotid_value'
+                    )
+                    # Group components by parent bot ID
+                    $compsByBot = @{}
+                    foreach ($comp in $allComponents) {
+                        $parentId = "$($comp._parentbotid_value)"
+                        if ($parentId -and $parentId -ne '') {
+                            if (-not $compsByBot.ContainsKey($parentId)) {
+                                $compsByBot[$parentId] = [System.Collections.Generic.List[object]]::new()
+                            }
+                            $compsByBot[$parentId].Add($comp)
+                        }
+                    }
+
+                    foreach ($bot in $bots) {
+                        $botId = "$($bot.botid)"
+                        $botName = "$($bot.name)"
+
+                        # Resolve formatted values (picklist labels)
+                        $fvLang = "language@$fv"; $langLabel = "$($bot.$fvLang)"
+                        if (-not $langLabel) { $langLabel = "$($bot.language)" }
+                        $fvAuth = "authenticationmode@$fv"; $authLabel = "$($bot.$fvAuth)"
+                        if (-not $authLabel) {
+                            $authLabel = switch ($bot.authenticationmode) { 0 {"Unspecified"} 1 {"None"} 2 {"Integrated"} 3 {"Custom Azure AD"} 4 {"Generic OAuth2"} default {"$($bot.authenticationmode)"} }
+                        }
+                        $fvAcp = "accesscontrolpolicy@$fv"; $acpLabel = "$($bot.$fvAcp)"
+                        if (-not $acpLabel) {
+                            $acpLabel = switch ($bot.accesscontrolpolicy) { 0 {"Any"} 1 {"Copilot readers"} 2 {"Group membership"} 3 {"Any (multi-tenant)"} default {"$($bot.accesscontrolpolicy)"} }
+                        }
+                        $stateLabel = if ($bot.statecode -eq 0) { "Active" } else { "Inactive" }
+                        $fvStatus = "statuscode@$fv"; $statusLabel = "$($bot.$fvStatus)"
+                        if (-not $statusLabel) {
+                            $statusLabel = switch ($bot.statuscode) { 1 {"Provisioned"} 2 {"Deprovisioned"} 3 {"Provisioning"} 4 {"ProvisionFailed"} 5 {"MissingLicense"} default {"$($bot.statuscode)"} }
+                        }
+
+                        # Get component counts for this bot
+                        $botComps = if ($compsByBot.ContainsKey($botId)) { $compsByBot[$botId] } else { @() }
+                        $topicCount = @($botComps | Where-Object { $_.componenttype -eq 0 -or $_.componenttype -eq 9 }).Count
+                        $knowledgeCount = @($botComps | Where-Object { $_.componenttype -eq 16 }).Count
+                        $skillCount = @($botComps | Where-Object { $_.componenttype -eq 1 -or $_.componenttype -eq 13 }).Count
+                        $customGptCount = @($botComps | Where-Object { $_.componenttype -eq 15 }).Count
+
+                        # Classify agent type: Declarative (lite/Agent Builder) vs Custom (full Copilot Studio)
+                        # Agents with a Custom GPT component (componenttype=15) are declarative/lite agents
+                        $agentType = if ($customGptCount -gt 0) { "Declarative" } else { "Custom" }
+
+                        # Resolve additional picklist labels
+                        $fvAuthTrig = "authenticationtrigger@$fv"; $authTrigLabel = "$($bot.$fvAuthTrig)"
+                        if (-not $authTrigLabel) {
+                            $authTrigLabel = switch ($bot.authenticationtrigger) { 0 {"As Needed"} 1 {"Always"} default {"$($bot.authenticationtrigger)"} }
+                        }
+                        $fvRuntime = "runtimeprovider@$fv"; $runtimeLabel = "$($bot.$fvRuntime)"
+                        if (-not $runtimeLabel) {
+                            $runtimeLabel = switch ($bot.runtimeprovider) { 0 {"Power Virtual Agents"} 1 {"Nuance Mix Shell"} default {"$($bot.runtimeprovider)"} }
+                        }
+
+                        # SupportedLanguages is a multi-select picklist; grab formatted value or raw
+                        $fvSuppLang = "supportedlanguages@$fv"; $suppLangLabel = "$($bot.$fvSuppLang)"
+                        if (-not $suppLangLabel) { $suppLangLabel = "$($bot.supportedlanguages)" }
+
+                        # Configuration is a JSON memo field — include as-is
+                        $configVal = "$($bot.configuration)"
+
+                        Append-CsvRow "$OutputPath/CopilotAgents.csv" ([PSCustomObject]@{
+                            BotId = $botId
+                            EnvironmentId = $envId
+                            EnvironmentName = $env.DisplayName
+                            DisplayName = $botName
+                            SchemaName = "$($bot.schemaname)"
+                            AgentType = $agentType
+                            Language = $langLabel
+                            AuthenticationMode = $authLabel
+                            AuthenticationTrigger = $authTrigLabel
+                            AccessControlPolicy = $acpLabel
+                            RuntimeProvider = $runtimeLabel
+                            SupportedLanguages = $suppLangLabel
+                            State = $stateLabel
+                            StatusReason = $statusLabel
+                            PublishedOn = "$($bot.publishedon)"
+                            PublishedByName = if ($bot.publishedby) { "$($bot.publishedby.fullname)" } else { "" }
+                            Origin = "$($bot.origin)"
+                            Template = "$($bot.template)"
+                            IsManaged = "$($bot.ismanaged)"
+                            SolutionId = "$($bot._solutionid_value)"
+                            Configuration = $configVal
+                            CreatedOn = "$($bot.createdon)"
+                            CreatedByName = if ($bot.createdby) { "$($bot.createdby.fullname)" } else { "" }
+                            ModifiedOn = "$($bot.modifiedon)"
+                            ModifiedByName = if ($bot.modifiedby) { "$($bot.modifiedby.fullname)" } else { "" }
+                            TopicCount = $topicCount
+                            KnowledgeSourceCount = $knowledgeCount
+                            SkillCount = $skillCount
+                            CustomGPTCount = $customGptCount
+                            TotalComponents = $botComps.Count
+                            CollectedAt = $timestamp
+                        })
+                        $envAgentCount++
+                        $totalAgents++
+
+                        # Write individual components
+                        foreach ($comp in $botComps) {
+                            $ctVal = $comp.componenttype
+                            $fvCt = "componenttype@$fv"; $ctLabel = "$($comp.$fvCt)"
+                            if (-not $ctLabel -and $componentTypeLabels.ContainsKey([int]$ctVal)) {
+                                $ctLabel = $componentTypeLabels[[int]$ctVal]
+                            }
+                            if (-not $ctLabel) { $ctLabel = "$ctVal" }
+                            $compState = if ($comp.statecode -eq 0) { "Active" } else { "Inactive" }
+
+                            Append-CsvRow "$OutputPath/CopilotComponents.csv" ([PSCustomObject]@{
+                                ComponentId = "$($comp.botcomponentid)"
+                                BotId = $botId
+                                BotName = $botName
+                                EnvironmentId = $envId
+                                EnvironmentName = $env.DisplayName
+                                Name = "$($comp.name)"
+                                ComponentType = $ctLabel
+                                Category = "$($comp.category)"
+                                Description = "$($comp.description)"
+                                Status = $compState
+                                IsManaged = "$($comp.ismanaged)"
+                                CreatedOn = "$($comp.createdon)"
+                                ModifiedOn = "$($comp.modifiedon)"
+                                CollectedAt = $timestamp
+                            })
+                            $totalAgentComponents++
+                        }
+                    }
+                }
+                Write-Host " $envAgentCount agents, $($allComponents.Count) components" -ForegroundColor DarkGray
+            }
+            else {
+                Write-Host " skipped (no Dataverse token)" -ForegroundColor DarkGray
+            }
+        }
+        catch {
+            $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="CopilotAgents"; Error=$_.Exception.Message; Timestamp=(Get-Date) })
+            Write-Host " Warning (copilot): $($_.Exception.Message)" -ForegroundColor DarkYellow
+        }
+    }
+
     # Mark environment as completed in checkpoint
     Add-Content -Path $checkpointFile -Value $envId -Encoding UTF8
     [void]$completedEnvs.Add($envId)
@@ -1209,6 +1513,7 @@ foreach ($env in $environments) {
 
 Write-Host "  Totals: $totalApps apps, $totalFlows flows, $totalConnectors connectors, $totalConnections connections" -ForegroundColor Gray
 Write-Host "  Totals: $totalAppConnRefs app-connector refs, $totalFlowConnRefs flow-connector refs, $totalTriggers triggers, $totalActions actions" -ForegroundColor Gray
+Write-Host "  Totals: $totalAgents copilot agents, $totalAgentComponents agent components" -ForegroundColor Gray
 
 # ============================================================================
 # 5. DLP POLICIES (tenant-level, not per-environment)
@@ -1457,4 +1762,7 @@ Write-Host "     - FlowConnectionRefs.FlowKey -> Flows.FlowKey" -ForegroundColor
 Write-Host "     - FlowConnectionRefs.ConnectorId -> Connectors.ConnectorId" -ForegroundColor Gray
 Write-Host "     - DlpConnectorRules.PolicyId -> DlpPolicies.PolicyId" -ForegroundColor Gray
 Write-Host "     - UsageAnalytics.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
+Write-Host "     - CopilotAgents.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
+Write-Host "     - CopilotComponents.BotId -> CopilotAgents.BotId" -ForegroundColor Gray
+Write-Host "     - CopilotComponents.EnvironmentId -> Environments.EnvironmentId" -ForegroundColor Gray
 Write-Host ""
