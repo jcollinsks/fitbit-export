@@ -876,6 +876,119 @@ $tFlowConnRefs = [ordered]@{
     )
 }
 
+# --- Table 12: CopilotAgents ---
+
+$tCopilotAgents = [ordered]@{
+    name = "CopilotAgents"; lineageTag = (New-Guid)
+    columns = @(
+        (New-ColumnDef "BotId" "string" "none" $null $true)
+        (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
+        (New-ColumnDef "EnvironmentName")
+        (New-ColumnDef "DisplayName")
+        (New-ColumnDef "SchemaName")
+        (New-ColumnDef "AgentType")
+        (New-ColumnDef "Language")
+        (New-ColumnDef "AuthenticationMode")
+        (New-ColumnDef "AuthenticationTrigger")
+        (New-ColumnDef "AccessControlPolicy")
+        (New-ColumnDef "RuntimeProvider")
+        (New-ColumnDef "SupportedLanguages")
+        (New-ColumnDef "State")
+        (New-ColumnDef "StatusReason")
+        (New-ColumnDef "PublishedOn" "dateTime")
+        (New-ColumnDef "PublishedByName")
+        (New-ColumnDef "Origin")
+        (New-ColumnDef "Template")
+        (New-ColumnDef "IsManaged" "boolean")
+        (New-ColumnDef "SolutionId")
+        (New-ColumnDef "Configuration")
+        (New-ColumnDef "CreatedOn" "dateTime")
+        (New-ColumnDef "CreatedByName")
+        (New-ColumnDef "ModifiedOn" "dateTime")
+        (New-ColumnDef "ModifiedByName")
+        (New-ColumnDef "TopicCount" "int64" "none")
+        (New-ColumnDef "KnowledgeSourceCount" "int64" "none")
+        (New-ColumnDef "SkillCount" "int64" "none")
+        (New-ColumnDef "CustomGPTCount" "int64" "none")
+        (New-ColumnDef "TotalComponents" "int64" "none")
+        (New-ColumnDef "CollectedAt" "dateTime")
+    )
+    partitions = @((New-CsvPartition "CopilotAgents" @(
+        @{Name="BotId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
+        @{Name="EnvironmentName"; Type="type text"}, @{Name="DisplayName"; Type="type text"},
+        @{Name="SchemaName"; Type="type text"}, @{Name="AgentType"; Type="type text"},
+        @{Name="Language"; Type="type text"}, @{Name="AuthenticationMode"; Type="type text"},
+        @{Name="AuthenticationTrigger"; Type="type text"}, @{Name="AccessControlPolicy"; Type="type text"},
+        @{Name="RuntimeProvider"; Type="type text"}, @{Name="SupportedLanguages"; Type="type text"},
+        @{Name="State"; Type="type text"}, @{Name="StatusReason"; Type="type text"},
+        @{Name="PublishedOn"; Type="type datetime"}, @{Name="PublishedByName"; Type="type text"},
+        @{Name="Origin"; Type="type text"}, @{Name="Template"; Type="type text"},
+        @{Name="IsManaged"; Type="type logical"}, @{Name="SolutionId"; Type="type text"},
+        @{Name="Configuration"; Type="type text"},
+        @{Name="CreatedOn"; Type="type datetime"}, @{Name="CreatedByName"; Type="type text"},
+        @{Name="ModifiedOn"; Type="type datetime"}, @{Name="ModifiedByName"; Type="type text"},
+        @{Name="TopicCount"; Type="Int64.Type"}, @{Name="KnowledgeSourceCount"; Type="Int64.Type"},
+        @{Name="SkillCount"; Type="Int64.Type"}, @{Name="CustomGPTCount"; Type="Int64.Type"},
+        @{Name="TotalComponents"; Type="Int64.Type"}, @{Name="CollectedAt"; Type="type datetime"}
+    )))
+    measures = @(
+        (New-MeasureDef "Total Agents" "COUNTROWS('CopilotAgents')" "#,##0" "Agent Metrics")
+        (New-MeasureDef "Declarative Agents" "CALCULATE(COUNTROWS('CopilotAgents'), 'CopilotAgents'[AgentType] = `"Declarative`")" "#,##0" "Agent Metrics")
+        (New-MeasureDef "Custom Agents" "CALCULATE(COUNTROWS('CopilotAgents'), 'CopilotAgents'[AgentType] = `"Custom`")" "#,##0" "Agent Metrics")
+        (New-MeasureDef "Active Agents" "CALCULATE(COUNTROWS('CopilotAgents'), 'CopilotAgents'[State] = `"Active`")" "#,##0" "Agent Metrics")
+        (New-MeasureDef "Inactive Agents" "CALCULATE(COUNTROWS('CopilotAgents'), 'CopilotAgents'[State] = `"Inactive`")" "#,##0" "Agent Metrics")
+        (New-MeasureDef "Published Agents" "CALCULATE(COUNTROWS('CopilotAgents'), 'CopilotAgents'[StatusReason] = `"Provisioned`")" "#,##0" "Agent Metrics")
+        (New-MeasureDef "Managed Agents" "CALCULATE(COUNTROWS('CopilotAgents'), 'CopilotAgents'[IsManaged] = TRUE())" "#,##0" "Agent Metrics")
+        (New-MeasureDef "Total Topics" "SUM('CopilotAgents'[TopicCount])" "#,##0" "Component Metrics")
+        (New-MeasureDef "Total Knowledge Sources" "SUM('CopilotAgents'[KnowledgeSourceCount])" "#,##0" "Component Metrics")
+        (New-MeasureDef "Total Skills" "SUM('CopilotAgents'[SkillCount])" "#,##0" "Component Metrics")
+        (New-MeasureDef "Total Agent Components" "SUM('CopilotAgents'[TotalComponents])" "#,##0" "Component Metrics")
+        (New-MeasureDef "Avg Components Per Agent" "DIVIDE(SUM('CopilotAgents'[TotalComponents]), COUNTROWS('CopilotAgents'), 0)" "0.0" "Component Metrics")
+        (New-MeasureDef "Unique Agent Creators" "DISTINCTCOUNT('CopilotAgents'[CreatedByName])" "#,##0" "Agent Metrics")
+        (New-MeasureDef "Agent Active Rate" "DIVIDE([Active Agents], [Total Agents], 0)" "0.0%" "Agent Metrics")
+    )
+}
+
+# --- Table 13: CopilotComponents ---
+
+$tCopilotComponents = [ordered]@{
+    name = "CopilotComponents"; lineageTag = (New-Guid)
+    columns = @(
+        (New-ColumnDef "ComponentId" "string" "none" $null $true)
+        (New-ColumnDef "BotId" "string" "none" $null $false $true)
+        (New-ColumnDef "BotName")
+        (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
+        (New-ColumnDef "EnvironmentName")
+        (New-ColumnDef "Name")
+        (New-ColumnDef "ComponentType")
+        (New-ColumnDef "Category")
+        (New-ColumnDef "Description")
+        (New-ColumnDef "Status")
+        (New-ColumnDef "IsManaged" "boolean")
+        (New-ColumnDef "CreatedOn" "dateTime")
+        (New-ColumnDef "ModifiedOn" "dateTime")
+        (New-ColumnDef "CollectedAt" "dateTime")
+    )
+    partitions = @((New-CsvPartition "CopilotComponents" @(
+        @{Name="ComponentId"; Type="type text"}, @{Name="BotId"; Type="type text"},
+        @{Name="BotName"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
+        @{Name="EnvironmentName"; Type="type text"}, @{Name="Name"; Type="type text"},
+        @{Name="ComponentType"; Type="type text"}, @{Name="Category"; Type="type text"},
+        @{Name="Description"; Type="type text"}, @{Name="Status"; Type="type text"},
+        @{Name="IsManaged"; Type="type logical"},
+        @{Name="CreatedOn"; Type="type datetime"}, @{Name="ModifiedOn"; Type="type datetime"},
+        @{Name="CollectedAt"; Type="type datetime"}
+    )))
+    measures = @(
+        (New-MeasureDef "Total Components" "COUNTROWS('CopilotComponents')" "#,##0" "Components")
+        (New-MeasureDef "Topic Components" "CALCULATE(COUNTROWS('CopilotComponents'), 'CopilotComponents'[ComponentType] IN {`"Topic`", `"Topic V2`"})" "#,##0" "Components")
+        (New-MeasureDef "Skill Components" "CALCULATE(COUNTROWS('CopilotComponents'), 'CopilotComponents'[ComponentType] IN {`"Skill`", `"Skill V2`"})" "#,##0" "Components")
+        (New-MeasureDef "Knowledge Source Components" "CALCULATE(COUNTROWS('CopilotComponents'), 'CopilotComponents'[ComponentType] = `"Knowledge Source`")" "#,##0" "Components")
+        (New-MeasureDef "Custom GPT Components" "CALCULATE(COUNTROWS('CopilotComponents'), 'CopilotComponents'[ComponentType] = `"Custom GPT`")" "#,##0" "Components")
+        (New-MeasureDef "Distinct Component Types" "DISTINCTCOUNT('CopilotComponents'[ComponentType])" "#,##0" "Components")
+    )
+}
+
 # --- Build model.bim ---
 
 $modelBim = [ordered]@{
@@ -885,7 +998,8 @@ $modelBim = [ordered]@{
         defaultPowerBIDataSourceVersion = "powerBI_V3"
         sourceQueryCulture = "en-US"
         tables = @($tEnvironments, $tApps, $tFlows, $tConnectors,
-                    $tDlpPolicies, $tDlpRules, $tUsage, $tAppConnRefs, $tFlowActions, $tFlowTriggers, $tFlowConnRefs)
+                    $tDlpPolicies, $tDlpRules, $tUsage, $tAppConnRefs, $tFlowActions, $tFlowTriggers, $tFlowConnRefs,
+                    $tCopilotAgents, $tCopilotComponents)
         relationships = @(
             (New-RelationshipDef "rel_Apps_Env" "Apps" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_Flows_Env" "Flows" "EnvironmentId" "Environments" "EnvironmentId")
@@ -896,6 +1010,8 @@ $modelBim = [ordered]@{
             (New-RelationshipDef "rel_FlowActions_Flows" "FlowActions" "FlowKey" "Flows" "FlowKey")
             (New-RelationshipDef "rel_FlowTriggers_Flows" "FlowTriggers" "FlowKey" "Flows" "FlowKey")
             (New-RelationshipDef "rel_FlowConnRefs_Flows" "FlowConnectionRefs" "FlowKey" "Flows" "FlowKey")
+            (New-RelationshipDef "rel_Agents_Env" "CopilotAgents" "EnvironmentId" "Environments" "EnvironmentId")
+            (New-RelationshipDef "rel_Components_Agent" "CopilotComponents" "BotId" "CopilotAgents" "BotId")
         )
         expressions = @(
             [ordered]@{
@@ -905,7 +1021,7 @@ $modelBim = [ordered]@{
             }
         )
         annotations = @(
-            @{ name = "PBI_QueryOrder"; value = "[`"Environments`",`"Apps`",`"Flows`",`"Connectors`",`"DlpPolicies`",`"DlpConnectorRules`",`"UsageAnalytics`",`"AppConnectorRefs`",`"FlowActions`",`"FlowTriggers`",`"FlowConnectionRefs`"]" }
+            @{ name = "PBI_QueryOrder"; value = "[`"Environments`",`"Apps`",`"Flows`",`"Connectors`",`"DlpPolicies`",`"DlpConnectorRules`",`"UsageAnalytics`",`"AppConnectorRefs`",`"FlowActions`",`"FlowTriggers`",`"FlowConnectionRefs`",`"CopilotAgents`",`"CopilotComponents`"]" }
             @{ name = "__PBI_TimeIntelligenceEnabled"; value = "0" }
         )
     }
@@ -982,7 +1098,7 @@ $absReportJson = Join-Path (Resolve-Path $reportDir2).Path "report.json"
 # 12 PAGES (8 governance + 4 detail)
 # ============================================================================
 
-$pageNames = @("executive", "environments", "apps", "flows", "connectors", "dlp", "endpoints", "lifecycle", "app-details", "flow-details", "env-details", "dlp-details")
+$pageNames = @("executive", "environments", "apps", "flows", "connectors", "dlp", "endpoints", "lifecycle", "agents", "app-details", "flow-details", "env-details", "dlp-details", "agent-details")
 Write-JsonFile "$defDir/pages/pages.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.0.0/schema.json"
     pageOrder = $pageNames
@@ -995,6 +1111,7 @@ $execMatrix = New-MatrixVisual "matrixMetrics" 20 480 875 230 8000 `
     @(@{Table="Apps"; Measure="Total Apps"},
       @{Table="Flows"; Measure="Total Flows"},
       @{Table="Connectors"; Measure="Total Connectors"},
+      @{Table="CopilotAgents"; Measure="Total Agents"},
       @{Table="Flows"; Measure="Suspended Flows"}) `
     "Key Metrics by Environment"
 
@@ -1007,6 +1124,7 @@ $pageDefs = @{
             (New-CardVisual "cardExecApps" 375 10 145 55 200 "Apps" "Total Apps" "Apps")
             (New-CardVisual "cardExecFlows" 540 10 145 55 300 "Flows" "Total Flows" "Flows")
             (New-CardVisual "cardExecConn" 705 10 145 55 400 "Connectors" "Total Connectors" "Connectors")
+            (New-CardVisual "cardExecAgents" 20 275 145 55 450 "CopilotAgents" "Total Agents" "Agents")
             (New-GaugeVisual "gaugeGovScore" 20 80 280 185 1000 "Environments" "Governance Score" "Governance Score")
             (New-GaugeVisual "gaugeSuspRate" 315 80 280 185 2000 "Flows" "Suspension Rate" "Suspension Rate")
             (New-GaugeVisual "gaugeStaleRate" 610 80 280 185 3000 "Apps" "Stale App Rate" "Stale App Rate")
@@ -1117,6 +1235,23 @@ $pageDefs = @{
             (New-TableVisual "tblStaleApps" 20 380 880 320 4000 "Apps" @("DisplayName","AppType","OwnerDisplayName","EnvironmentName","LastModifiedTime") "Stale App Details")
         )
     }
+    agents = @{
+        displayName = "Copilot Agents"
+        visuals = @(
+            (New-SlicerVisual "slicerEnvAgents" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
+            (New-CardVisual "cardAgentTotal" 210 20 120 80 100 "CopilotAgents" "Total Agents" "Agents")
+            (New-CardVisual "cardAgentDecl" 345 20 120 80 200 "CopilotAgents" "Declarative Agents" "Declarative")
+            (New-CardVisual "cardAgentCustom" 480 20 120 80 300 "CopilotAgents" "Custom Agents" "Custom")
+            (New-CardVisual "cardAgentActive" 615 20 120 80 400 "CopilotAgents" "Active Agents" "Active")
+            (New-CardVisual "cardAgentManaged" 750 20 120 80 500 "CopilotAgents" "Managed Agents" "Managed")
+            (New-DonutVisual "donutAgentType" 20 120 280 240 1000 "CopilotAgents" "AgentType" "Total Agents" "Agent Types (Declarative vs Custom)")
+            (New-BarChartVisual "barAgentEnv" 315 120 280 240 2000 "CopilotAgents" "EnvironmentName" "Total Agents" "Agents by Environment")
+            (New-DonutVisual "donutAgentAuth" 610 120 280 240 3000 "CopilotAgents" "AuthenticationMode" "Total Agents" "Authentication Modes")
+            (New-TreemapVisual "tmCompTypes" 20 380 430 160 4000 "CopilotComponents" "ComponentType" "CopilotComponents" "Total Components" "Component Types")
+            (New-BarChartVisual "barAgentCreators" 470 380 430 160 5000 "CopilotAgents" "CreatedByName" "Total Agents" "Top Agent Creators")
+            (New-TableVisual "tblAgents" 20 555 880 160 6000 "CopilotAgents" @("DisplayName","AgentType","State","StatusReason","Language","AuthenticationMode","EnvironmentName","TopicCount","KnowledgeSourceCount","TotalComponents","PublishedOn") "Agent Details")
+        )
+    }
     # --- Detail Pages ---
     "app-details" = @{
         displayName = "App Details"
@@ -1139,14 +1274,16 @@ $pageDefs = @{
         displayName = "Environment Details"
         visuals = @(
             (New-SlicerVisual "slicerEnvDetail" 20 20 170 80 50 "Environments" "DisplayName" "Select Environment")
-            (New-CardVisual "cardEnvDetApps" 210 20 120 80 100 "Apps" "Total Apps" "Apps")
-            (New-CardVisual "cardEnvDetFlows" 345 20 120 80 200 "Flows" "Total Flows" "Flows")
-            (New-CardVisual "cardEnvDetConn" 480 20 120 80 300 "Connectors" "Total Connectors" "Connectors")
-            (New-CardVisual "cardEnvDetUnsec" 615 20 120 80 400 "Environments" "Unsecured Environments" "Unsecured")
-            (New-CardVisual "cardEnvDetCap" 750 20 120 80 500 "Environments" "Total Capacity GB" "Capacity GB")
+            (New-CardVisual "cardEnvDetApps" 210 20 105 80 100 "Apps" "Total Apps" "Apps")
+            (New-CardVisual "cardEnvDetFlows" 330 20 105 80 200 "Flows" "Total Flows" "Flows")
+            (New-CardVisual "cardEnvDetConn" 450 20 105 80 300 "Connectors" "Total Connectors" "Connectors")
+            (New-CardVisual "cardEnvDetAgents" 570 20 105 80 350 "CopilotAgents" "Total Agents" "Agents")
+            (New-CardVisual "cardEnvDetUnsec" 690 20 105 80 400 "Environments" "Unsecured Environments" "Unsecured")
+            (New-CardVisual "cardEnvDetCap" 810 20 90 80 500 "Environments" "Total Capacity GB" "Capacity GB")
             (New-TableVisual "tblEnvInfo" 20 120 880 200 1000 "Environments" @("DisplayName","EnvironmentType","Region","State","IsDefault","IsDataverseEnabled","SecurityGroupId","DatabaseUsedMb","FileUsedMb","LogUsedMb","CreatedTime","LastModifiedTime") "Environment Info")
-            (New-TableVisual "tblEnvApps" 20 340 430 360 2000 "Apps" @("DisplayName","AppType","OwnerDisplayName","Status") "Environment Apps")
-            (New-TableVisual "tblEnvFlows" 470 340 430 360 3000 "Flows" @("DisplayName","State","TriggerType","CreatorDisplayName") "Environment Flows")
+            (New-TableVisual "tblEnvApps" 20 340 290 360 2000 "Apps" @("DisplayName","AppType","OwnerDisplayName","Status") "Environment Apps")
+            (New-TableVisual "tblEnvFlows" 325 340 290 360 3000 "Flows" @("DisplayName","State","TriggerType","CreatorDisplayName") "Environment Flows")
+            (New-TableVisual "tblEnvAgents" 630 340 270 360 4000 "CopilotAgents" @("DisplayName","AgentType","State","TotalComponents") "Environment Agents")
         )
     }
     "dlp-details" = @{
@@ -1158,6 +1295,18 @@ $pageDefs = @{
             (New-CardVisual "cardDlpDetBlocked" 480 20 120 80 300 "DlpConnectorRules" "Blocked Connectors" "Blocked")
             (New-TableVisual "tblDlpInfo" 20 120 880 200 1000 "DlpPolicies" @("DisplayName","IsEnabled","PolicyType","EnvironmentScope","CreatedTime","LastModifiedTime") "Policy Info")
             (New-TableVisual "tblDlpConnRules" 20 340 880 360 2000 "DlpConnectorRules" @("ConnectorName","Classification","PolicyName") "Connector Rules")
+        )
+    }
+    "agent-details" = @{
+        displayName = "Agent Details"
+        visuals = @(
+            (New-SlicerVisual "slicerAgentDetail" 20 20 170 80 50 "CopilotAgents" "DisplayName" "Select Agent")
+            (New-CardVisual "cardAgentDetTopics" 210 20 120 80 100 "CopilotAgents" "Total Topics" "Topics")
+            (New-CardVisual "cardAgentDetKnow" 345 20 120 80 200 "CopilotAgents" "Total Knowledge Sources" "Knowledge")
+            (New-CardVisual "cardAgentDetSkills" 480 20 120 80 300 "CopilotAgents" "Total Skills" "Skills")
+            (New-CardVisual "cardAgentDetComps" 615 20 120 80 400 "CopilotAgents" "Total Agent Components" "Components")
+            (New-TableVisual "tblAgentInfo" 20 120 880 220 1000 "CopilotAgents" @("DisplayName","AgentType","SchemaName","State","StatusReason","Language","AuthenticationMode","AuthenticationTrigger","AccessControlPolicy","RuntimeProvider","Origin","Template","IsManaged","SolutionId","PublishedOn","PublishedByName","CreatedOn","CreatedByName","ModifiedOn") "Agent Info")
+            (New-TableVisual "tblAgentComps" 20 360 880 340 2000 "CopilotComponents" @("Name","ComponentType","Category","Description","Status","IsManaged","CreatedOn","ModifiedOn") "Agent Components")
         )
     }
 }
