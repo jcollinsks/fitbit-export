@@ -175,13 +175,21 @@ function Get-DataverseToken {
     if ($cached -and [datetime]::UtcNow -lt $cached.Expiry) { return $cached.Token }
     try {
         $result = Get-AzAccessToken -ResourceUrl $resource -AsSecureString
-        $token = Get-TokenString $result.Token
-        $script:dvTokens[$resource] = @{ Token = $token; Expiry = [datetime]::UtcNow.AddMinutes(20) }
-        return $token
     }
     catch {
-        return $null
+        Write-Host " [Auth] Dataverse token failed, re-authenticating..." -ForegroundColor DarkGray
+        try {
+            Connect-AzAccount @script:connectArgs | Out-Null
+            $result = Get-AzAccessToken -ResourceUrl $resource -AsSecureString
+        }
+        catch {
+            Write-Host " [Auth] Dataverse token failed for $resource : $($_.Exception.Message)" -ForegroundColor DarkYellow
+            return $null
+        }
     }
+    $token = Get-TokenString $result.Token
+    $script:dvTokens[$resource] = @{ Token = $token; Expiry = [datetime]::UtcNow.AddMinutes(20) }
+    return $token
 }
 
 function Invoke-DataverseOData {
