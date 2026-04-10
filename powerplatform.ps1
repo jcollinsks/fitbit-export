@@ -1486,7 +1486,12 @@ foreach ($env in $environments) {
                         # Configuration is a JSON memo field — include as-is
                         $configVal = "$($bot.configuration)"
 
+                        # Composite key: botid is not unique across environments (system-provisioned
+                        # bots like "Copilot in Power Apps" share GUIDs), so we use envId_botId.
+                        $agentKey = "$envId`_$botId"
+
                         Append-CsvRow "$OutputPath/CopilotAgents.csv" ([PSCustomObject]@{
+                            AgentKey = $agentKey
                             BotId = $botId
                             EnvironmentId = $envId
                             EnvironmentName = $env.DisplayName
@@ -1543,6 +1548,7 @@ foreach ($env in $environments) {
 
                             Append-CsvRow "$OutputPath/CopilotComponents.csv" ([PSCustomObject]@{
                                 ComponentId = "$($comp.botcomponentid)"
+                                AgentKey = $agentKey
                                 BotId = $botId
                                 BotName = $botName
                                 EnvironmentId = $envId

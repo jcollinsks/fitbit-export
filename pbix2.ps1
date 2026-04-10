@@ -881,7 +881,8 @@ $tFlowConnRefs = [ordered]@{
 $tCopilotAgents = [ordered]@{
     name = "CopilotAgents"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "BotId" "string" "none" $null $true)
+        (New-ColumnDef "AgentKey" "string" "none" $null $true $true)
+        (New-ColumnDef "BotId" "string" "none" $null $false)
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
         (New-ColumnDef "DisplayName")
@@ -914,6 +915,7 @@ $tCopilotAgents = [ordered]@{
         (New-ColumnDef "CollectedAt" "dateTime")
     )
     partitions = @((New-CsvPartition "CopilotAgents" @(
+        @{Name="AgentKey"; Type="type text"},
         @{Name="BotId"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
         @{Name="EnvironmentName"; Type="type text"}, @{Name="DisplayName"; Type="type text"},
         @{Name="SchemaName"; Type="type text"}, @{Name="AgentType"; Type="type text"},
@@ -955,6 +957,7 @@ $tCopilotComponents = [ordered]@{
     name = "CopilotComponents"; lineageTag = (New-Guid)
     columns = @(
         (New-ColumnDef "ComponentId" "string" "none" $null $true)
+        (New-ColumnDef "AgentKey" "string" "none" $null $false $true)
         (New-ColumnDef "BotId" "string" "none" $null $false $true)
         (New-ColumnDef "BotName")
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
@@ -970,7 +973,8 @@ $tCopilotComponents = [ordered]@{
         (New-ColumnDef "CollectedAt" "dateTime")
     )
     partitions = @((New-CsvPartition "CopilotComponents" @(
-        @{Name="ComponentId"; Type="type text"}, @{Name="BotId"; Type="type text"},
+        @{Name="ComponentId"; Type="type text"}, @{Name="AgentKey"; Type="type text"},
+        @{Name="BotId"; Type="type text"},
         @{Name="BotName"; Type="type text"}, @{Name="EnvironmentId"; Type="type text"},
         @{Name="EnvironmentName"; Type="type text"}, @{Name="Name"; Type="type text"},
         @{Name="ComponentType"; Type="type text"}, @{Name="Category"; Type="type text"},
@@ -1011,7 +1015,7 @@ $modelBim = [ordered]@{
             (New-RelationshipDef "rel_FlowTriggers_Flows" "FlowTriggers" "FlowKey" "Flows" "FlowKey")
             (New-RelationshipDef "rel_FlowConnRefs_Flows" "FlowConnectionRefs" "FlowKey" "Flows" "FlowKey")
             (New-RelationshipDef "rel_Agents_Env" "CopilotAgents" "EnvironmentId" "Environments" "EnvironmentId")
-            (New-RelationshipDef "rel_Components_Agent" "CopilotComponents" "BotId" "CopilotAgents" "BotId")
+            (New-RelationshipDef "rel_Components_Agent" "CopilotComponents" "AgentKey" "CopilotAgents" "AgentKey")
         )
         expressions = @(
             [ordered]@{
