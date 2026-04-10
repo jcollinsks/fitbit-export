@@ -1358,38 +1358,60 @@ foreach ($env in $environments) {
                     18='Copilot Settings'; 19='Test Case'
                 }
 
+                # DIAGNOSTIC PROBE: simplest possible query to see if bot entity is accessible
+                # This isolates auth/schema issues from the main query
+                $probeOk = $false
+                $probeCount = -1
+                $probeError = $null
+                try {
+                    $probe = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query 'bots?$select=botid,name&$top=5'
+                    $probeOk = $true
+                    $probeCount = @($probe).Count
+                    Write-Host " [probe:$probeCount]" -ForegroundColor DarkCyan -NoNewline
+                    if ($probeCount -gt 0) {
+                        $firstName = "$($probe[0].name)"
+                        if ($firstName) { Write-Host " first='$firstName'" -ForegroundColor DarkCyan -NoNewline }
+                    }
+                }
+                catch {
+                    $probeError = $_.Exception.Message
+                    $status = 0; try { $status = $_.Exception.Response.StatusCode.value__ } catch {}
+                    Write-Host " [probe-failed:$status $probeError]" -ForegroundColor DarkYellow -NoNewline
+                }
+
                 # Fetch all bots in this environment
                 # Use lookup _value fields + formatted value annotations instead of $expand
                 # Try full field list first; fall back to core fields on error (schema varies)
                 $bots = $null
                 $botQueryError = $null
-                try {
-                    $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
-                        'bots?$select=botid,name,schemaname,language,authenticationmode,authenticationtrigger,' +
-                        'accesscontrolpolicy,runtimeprovider,supportedlanguages,configuration,' +
-                        'statecode,statuscode,publishedon,_publishedby_value,' +
-                        'origin,template,ismanaged,_solutionid_value,' +
-                        'createdon,_createdby_value,modifiedon,_modifiedby_value'
-                    )
-                }
-                catch {
-                    $botQueryError = $_.Exception.Message
-                    # Fallback: core fields only (newer fields may not exist)
+                if ($probeOk -and $probeCount -gt 0) {
                     try {
                         $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
-                            'bots?$select=botid,name,schemaname,language,authenticationmode,' +
-                            'accesscontrolpolicy,statecode,statuscode,publishedon,_publishedby_value,' +
+                            'bots?$select=botid,name,schemaname,language,authenticationmode,authenticationtrigger,' +
+                            'accesscontrolpolicy,runtimeprovider,supportedlanguages,configuration,' +
+                            'statecode,statuscode,publishedon,_publishedby_value,' +
                             'origin,template,ismanaged,_solutionid_value,' +
                             'createdon,_createdby_value,modifiedon,_modifiedby_value'
                         )
-                        if ($bots.Count -gt 0) {
-                            Write-Host " (core-fields-only)" -ForegroundColor DarkGray -NoNewline
-                        }
                     }
                     catch {
-                        # Bot entity likely doesn't exist in this environment
-                        $bots = @()
-                        Write-Host " (no bot entity: $($_.Exception.Message))" -ForegroundColor DarkYellow -NoNewline
+                        $botQueryError = $_.Exception.Message
+                        # Fallback: core fields only (newer fields may not exist)
+                        try {
+                            $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
+                                'bots?$select=botid,name,schemaname,language,authenticationmode,' +
+                                'accesscontrolpolicy,statecode,statuscode,publishedon,_publishedby_value,' +
+                                'origin,template,ismanaged,_solutionid_value,' +
+                                'createdon,_createdby_value,modifiedon,_modifiedby_value'
+                            )
+                            if ($bots.Count -gt 0) {
+                                Write-Host " (core-fields-only)" -ForegroundColor DarkGray -NoNewline
+                            }
+                        }
+                        catch {
+                            $bots = @()
+                            Write-Host " (full-query-failed: $($_.Exception.Message))" -ForegroundColor DarkYellow -NoNewline
+                        }
                     }
                 }
                 if (-not $bots) { $bots = @() }
