@@ -1380,37 +1380,38 @@ foreach ($env in $environments) {
                 }
 
                 # Fetch all bots in this environment
-                # Use lookup _value fields + formatted value annotations instead of $expand
-                # Try full field list first; fall back to core fields on error (schema varies)
+                # Strategy: probe first (2 fields), then try curated field list, then fall back
+                # to no-$select (all default fields), then finally use probe data.
+                # The bot entity column set varies across Dataverse versions — fields like
+                # accesscontrolpolicy, origin, _solutionid_value are NOT standard and break $select.
                 $bots = $null
                 $botQueryError = $null
                 if ($probeOk -and $probeCount -gt 0) {
+                    # Try 1: curated safe field list (confirmed in PowerDocu bot.xml schema)
                     try {
                         $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
                             'bots?$select=botid,name,schemaname,language,authenticationmode,authenticationtrigger,' +
-                            'accesscontrolpolicy,runtimeprovider,supportedlanguages,configuration,' +
-                            'statecode,statuscode,publishedon,_publishedby_value,' +
-                            'origin,template,ismanaged,_solutionid_value,' +
+                            'runtimeprovider,statecode,statuscode,publishedon,_publishedby_value,' +
+                            'template,ismanaged,iscustomizable,' +
                             'createdon,_createdby_value,modifiedon,_modifiedby_value'
                         )
                     }
                     catch {
-                        $botQueryError = $_.Exception.Message
-                        # Fallback: core fields only (newer fields may not exist)
+                        $botQueryError = "curated: $($_.Exception.Message)"
+                        # Try 2: no $select at all — returns all default fields, guaranteed safe
                         try {
-                            $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query (
-                                'bots?$select=botid,name,schemaname,language,authenticationmode,' +
-                                'accesscontrolpolicy,statecode,statuscode,publishedon,_publishedby_value,' +
-                                'origin,template,ismanaged,_solutionid_value,' +
-                                'createdon,_createdby_value,modifiedon,_modifiedby_value'
-                            )
+                            $bots = Invoke-DataverseOData -OrgUrl $env.OrgUrl -Token $dvToken -Query 'bots'
                             if ($bots.Count -gt 0) {
-                                Write-Host " (core-fields-only)" -ForegroundColor DarkGray -NoNewline
+                                Write-Host " (no-select)" -ForegroundColor DarkGray -NoNewline
+                                $botQueryError = $null
                             }
                         }
                         catch {
-                            $bots = @()
-                            Write-Host " (full-query-failed: $($_.Exception.Message))" -ForegroundColor DarkYellow -NoNewline
+                            $botQueryError += " | no-select: $($_.Exception.Message)"
+                            # Try 3: use probe data directly (botid + name only)
+                            $bots = $probe
+                            Write-Host " (using-probe-data)" -ForegroundColor DarkYellow -NoNewline
+                            $botQueryError = $null
                         }
                     }
                 }
