@@ -2,15 +2,17 @@
 .SYNOPSIS
     Generates an Enterprise Governance Power BI Dashboard (PBIP) from Power Platform CSV exports.
 .DESCRIPTION
-    Creates a 12-page governance-focused PBIP project with:
-    - ~60 DAX measures (risk scores, staleness, trends, ratios)
+    Creates a 16-page executive-grade governance PBIP project with:
+    - ~100+ DAX measures (governance score, shadow IT rate, cross-table composites)
+    - 14 tables including Connections (new), cross-table intelligence measures
     - Visual types: card, donut, bar, lineChart, treemap, gauge, slicer, columnChart, matrix, table
-    - Environment slicer filtering on key pages
-    - KPI banner → insights row → detail table layout per page
+    - Narrative flow: Command Center → Domain Deep-Dives → Risk Intelligence → Detail/Drill-Down
+    - Consistent 20px grid system, hero KPIs, insight charts, drill-down tables
 
-    Pages: Executive Summary, Environment Governance, App Inventory & Risk,
-           Flow Health & Operations, Connector Risk Analysis, DLP & Compliance,
-           Endpoint & API Risk, Shadow IT & Lifecycle
+    Tier 1 — Command Center: Executive Command Center
+    Tier 2 — Domain Governance: Environments, Apps, Flows, Agents, Connectors/DLP, Endpoints
+    Tier 3 — Risk & Intelligence: Risk/Shadow IT, Maker Activity, Connection Intelligence
+    Tier 4 — Detail/Drill-Down: Environment, App, Flow, Agent, DLP Policy, Connector
 
     Open the generated .pbip file in Power BI Desktop (Developer Mode enabled).
 .PARAMETER CsvPath
@@ -531,7 +533,14 @@ $tEnvironments = [ordered]@{
         (New-MeasureDef "Unsecured Environments" "CALCULATE(COUNTROWS('Environments'), ISBLANK('Environments'[SecurityGroupId]) || 'Environments'[SecurityGroupId] = `"`") + 0")
         (New-MeasureDef "Env Security Rate" "DIVIDE([Total Environments] - [Unsecured Environments], [Total Environments], 0)" "0.0%")
         (New-MeasureDef "Default Environments" "CALCULATE(COUNTROWS('Environments'), 'Environments'[IsDefault] = TRUE())")
-        (New-MeasureDef "Governance Score" "[Env Security Rate] * 0.25 + (1 - [Suspension Rate]) * 0.25 + (1 - [Stale App Rate]) * 0.25 + [DLP Coverage Rate] * 0.25" "0.0%" "Governance")
+        (New-MeasureDef "Developer Environments" "CALCULATE(COUNTROWS('Environments'), 'Environments'[EnvironmentType] = `"Developer`")")
+        # Cross-table composite measures (hub table)
+        (New-MeasureDef "Governance Score" "VAR SecurityScore = [Env Security Rate] * 20 VAR DlpScore = [DLP Coverage Rate] * 20 VAR FlowHealthScore = (1 - [Suspension Rate]) * 20 VAR SolutionScore = DIVIDE([Solution-Aware Flows] + [Solution-Aware Apps], [Total Flows] + [Total Apps], 0) * 20 VAR LifecycleScore = (1 - DIVIDE([Stale Apps (90d)] + [Stale Flows (90d)], [Total Apps] + [Total Flows], 0)) * 20 RETURN ROUND(SecurityScore + DlpScore + FlowHealthScore + SolutionScore + LifecycleScore, 0)" "0" "Governance")
+        (New-MeasureDef "Flow Health Rate" "1 - [Suspension Rate]" "0.0%" "Governance")
+        (New-MeasureDef "Shadow IT Rate" "DIVIDE([Unmanaged Flows] + CALCULATE(COUNTROWS('Apps'), 'Apps'[IsSolutionAware] = FALSE()), [Total Flows] + [Total Apps], 0)" "0.0%" "Risk")
+        (New-MeasureDef "Total Resources" "[Total Apps] + [Total Flows] + [Total Agents]" "#,##0" "Metrics")
+        (New-MeasureDef "Overall Solution Coverage" "DIVIDE([Solution-Aware Apps] + [Solution-Aware Flows], [Total Apps] + [Total Flows], 0)" "0.0%" "Governance")
+        (New-MeasureDef "Security Coverage" "[Env Security Rate]" "0.0%" "Governance")
     )
 }
 
@@ -593,6 +602,8 @@ $tApps = [ordered]@{
         (New-MeasureDef "Bypass Consent Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[BypassConsent] = TRUE())")
         (New-MeasureDef "Apps Created Last 30d" "CALCULATE(COUNTROWS('Apps'), 'Apps'[CreatedTime] >= TODAY() - 30)")
         (New-MeasureDef "Custom API Apps" "CALCULATE(COUNTROWS('Apps'), 'Apps'[UsesCustomApi] = TRUE())")
+        (New-MeasureDef "Unique App Owners" "DISTINCTCOUNT('Apps'[OwnerObjectId])" "#,##0" "Makers")
+        (New-MeasureDef "Avg Apps Per Owner" "DIVIDE([Total Apps], [Unique App Owners], 0)" "0.0" "Makers")
     )
 }
 
@@ -648,6 +659,9 @@ $tFlows = [ordered]@{
         (New-MeasureDef "Unmanaged Flows" "CALCULATE(COUNTROWS('Flows'), 'Flows'[IsManaged] = FALSE())")
         (New-MeasureDef "Flows Created Last 30d" "CALCULATE(COUNTROWS('Flows'), 'Flows'[CreatedTime] >= TODAY() - 30)")
         (New-MeasureDef "Avg Actions Per Flow" "DIVIDE(COUNTROWS('FlowActions'), COUNTROWS('Flows'), 0)" "#,##0.0")
+        (New-MeasureDef "Orphaned Flows" "CALCULATE(COUNTROWS('Flows'), ISBLANK('Flows'[CreatorDisplayName]) || 'Flows'[CreatorDisplayName] = `"`") + 0" "#,##0" "Risk")
+        (New-MeasureDef "Unique Flow Creators" "DISTINCTCOUNT('Flows'[CreatorObjectId])" "#,##0" "Makers")
+        (New-MeasureDef "Avg Flows Per Creator" "DIVIDE([Total Flows], [Unique Flow Creators], 0)" "0.0" "Makers")
     )
 }
 
@@ -679,7 +693,7 @@ $tConnectors = [ordered]@{
         # New governance measures
         (New-MeasureDef "Standard Connectors" "CALCULATE(COUNTROWS('Connectors'), 'Connectors'[Tier] = `"Standard`")")
         (New-MeasureDef "Unique Connector Types" "DISTINCTCOUNT('Connectors'[DisplayName])")
-        (New-MeasureDef "Connector Utilization" "DIVIDE(DISTINCTCOUNT('AppConnectorRefs'[ConnectorId]), COUNTROWS('Connectors'), 0)" "0.0%")
+        (New-MeasureDef "Connector Utilization" "DIVIDE(DISTINCTCOUNT('FlowConnectionRefs'[ConnectorId]), COUNTROWS('Connectors'), 0)" "0.0%")
     )
 }
 
@@ -706,7 +720,7 @@ $tDlpPolicies = [ordered]@{
     measures = @(
         (New-MeasureDef "Total DLP Policies" "COUNTROWS('DlpPolicies')")
         (New-MeasureDef "Enabled Policies" "CALCULATE(COUNTROWS('DlpPolicies'), 'DlpPolicies'[IsEnabled] = TRUE())")
-        (New-MeasureDef "DLP Coverage Rate" "DIVIDE([Enabled Policies], CALCULATE(COUNTROWS('Environments'), ALL('Environments')), 0)" "0.0%" "Governance")
+        (New-MeasureDef "DLP Coverage Rate" "DIVIDE([Enabled Policies], [Total DLP Policies], 0)" "0.0%" "Governance")
     )
 }
 
@@ -873,6 +887,7 @@ $tFlowConnRefs = [ordered]@{
     measures = @(
         (New-MeasureDef "Total Flow Connections" "COUNTROWS('FlowConnectionRefs')")
         (New-MeasureDef "Distinct Connection URLs" "DISTINCTCOUNT('FlowConnectionRefs'[ConnectionUrl])")
+        (New-MeasureDef "Flow Connection Count" "COUNTROWS('FlowConnectionRefs')" "#,##0" "Connections")
     )
 }
 
@@ -993,6 +1008,43 @@ $tCopilotComponents = [ordered]@{
     )
 }
 
+# --- Table 14: Connections ---
+
+$tConnections = [ordered]@{
+    name = "Connections"; lineageTag = (New-Guid)
+    columns = @(
+        (New-ColumnDef "ConnectionId" "string" "none" -IsKey $true)
+        (New-ColumnDef "ConnectorId" "string" "none" $null $false $true)
+        (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
+        (New-ColumnDef "EnvironmentName")
+        (New-ColumnDef "DisplayName")
+        (New-ColumnDef "ConnectionUrl")
+        (New-ColumnDef "CreatedByObjectId")
+        (New-ColumnDef "CreatedByName")
+        (New-ColumnDef "CreatedByEmail")
+        (New-ColumnDef "CreatedTime" "dateTime" "none" "yyyy-MM-dd")
+        (New-ColumnDef "Status")
+        (New-ColumnDef "IsShared" "boolean")
+        (New-ColumnDef "CollectedAt" "dateTime")
+    )
+    partitions = @((New-CsvPartition "Connections" @(
+        @{Name="ConnectionId"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
+        @{Name="EnvironmentId"; Type="type text"}, @{Name="EnvironmentName"; Type="type text"},
+        @{Name="DisplayName"; Type="type text"}, @{Name="ConnectionUrl"; Type="type text"},
+        @{Name="CreatedByObjectId"; Type="type text"}, @{Name="CreatedByName"; Type="type text"},
+        @{Name="CreatedByEmail"; Type="type text"}, @{Name="CreatedTime"; Type="type datetime"},
+        @{Name="Status"; Type="type text"}, @{Name="IsShared"; Type="type logical"},
+        @{Name="CollectedAt"; Type="type datetime"}
+    )))
+    measures = @(
+        (New-MeasureDef "Total Connections" "COUNTROWS('Connections')" "#,##0" "Connections")
+        (New-MeasureDef "Shared Connections" "CALCULATE(COUNTROWS('Connections'), 'Connections'[IsShared] = TRUE())" "#,##0" "Connections")
+        (New-MeasureDef "Active Connections" "CALCULATE(COUNTROWS('Connections'), 'Connections'[Status] = `"Connected`")" "#,##0" "Connections")
+        (New-MeasureDef "Unique Connection Creators" "DISTINCTCOUNT('Connections'[CreatedByObjectId])" "#,##0" "Connections")
+        (New-MeasureDef "Connector Types Used" "DISTINCTCOUNT('Connections'[ConnectorId])" "#,##0" "Connections")
+    )
+}
+
 # --- Build model.bim ---
 
 $modelBim = [ordered]@{
@@ -1003,7 +1055,7 @@ $modelBim = [ordered]@{
         sourceQueryCulture = "en-US"
         tables = @($tEnvironments, $tApps, $tFlows, $tConnectors,
                     $tDlpPolicies, $tDlpRules, $tUsage, $tAppConnRefs, $tFlowActions, $tFlowTriggers, $tFlowConnRefs,
-                    $tCopilotAgents, $tCopilotComponents)
+                    $tCopilotAgents, $tCopilotComponents, $tConnections)
         relationships = @(
             (New-RelationshipDef "rel_Apps_Env" "Apps" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_Flows_Env" "Flows" "EnvironmentId" "Environments" "EnvironmentId")
@@ -1016,6 +1068,7 @@ $modelBim = [ordered]@{
             (New-RelationshipDef "rel_FlowConnRefs_Flows" "FlowConnectionRefs" "FlowKey" "Flows" "FlowKey")
             (New-RelationshipDef "rel_Agents_Env" "CopilotAgents" "EnvironmentId" "Environments" "EnvironmentId")
             (New-RelationshipDef "rel_Components_Agent" "CopilotComponents" "AgentKey" "CopilotAgents" "AgentKey")
+            (New-RelationshipDef "rel_Connections_Env" "Connections" "EnvironmentId" "Environments" "EnvironmentId")
         )
         expressions = @(
             [ordered]@{
@@ -1025,7 +1078,7 @@ $modelBim = [ordered]@{
             }
         )
         annotations = @(
-            @{ name = "PBI_QueryOrder"; value = "[`"Environments`",`"Apps`",`"Flows`",`"Connectors`",`"DlpPolicies`",`"DlpConnectorRules`",`"UsageAnalytics`",`"AppConnectorRefs`",`"FlowActions`",`"FlowTriggers`",`"FlowConnectionRefs`",`"CopilotAgents`",`"CopilotComponents`"]" }
+            @{ name = "PBI_QueryOrder"; value = "[`"Environments`",`"Apps`",`"Flows`",`"Connectors`",`"DlpPolicies`",`"DlpConnectorRules`",`"UsageAnalytics`",`"AppConnectorRefs`",`"FlowActions`",`"FlowTriggers`",`"FlowConnectionRefs`",`"CopilotAgents`",`"CopilotComponents`",`"Connections`"]" }
             @{ name = "__PBI_TimeIntelligenceEnabled"; value = "0" }
         )
     }
@@ -1099,218 +1152,334 @@ $absReportJson = Join-Path (Resolve-Path $reportDir2).Path "report.json"
 [System.IO.File]::WriteAllText($absReportJson, $reportJsonContent, [System.Text.UTF8Encoding]::new($false))
 
 # ============================================================================
-# 12 PAGES (8 governance + 4 detail)
+# 16 PAGES (1 command center + 6 domain + 3 risk/intelligence + 6 detail)
 # ============================================================================
 
-$pageNames = @("executive", "environments", "apps", "flows", "connectors", "dlp", "endpoints", "lifecycle", "agents", "app-details", "flow-details", "env-details", "dlp-details", "agent-details")
+$pageNames = @("executive", "environments", "apps", "flows", "agents", "connectors-dlp", "endpoints", "risk", "makers", "connections", "env-details", "app-details", "flow-details", "agent-details", "dlp-details", "connector-details")
 Write-JsonFile "$defDir/pages/pages.json" ([ordered]@{
     '$schema' = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.0.0/schema.json"
     pageOrder = $pageNames
     activePageName = "executive"
 })
 
-# --- Page 1: Executive Summary ---
-$execMatrix = New-MatrixVisual "matrixMetrics" 20 480 875 230 8000 `
+# --- Page 1: Executive Command Center ---
+$execMatrix = New-MatrixVisual "matrixEnvMetrics" 20 380 1220 160 8000 `
     @(@{Table="Environments"; Column="DisplayName"}) `
     @(@{Table="Apps"; Measure="Total Apps"},
       @{Table="Flows"; Measure="Total Flows"},
-      @{Table="Connectors"; Measure="Total Connectors"},
       @{Table="CopilotAgents"; Measure="Total Agents"},
-      @{Table="Flows"; Measure="Suspended Flows"}) `
-    "Key Metrics by Environment"
+      @{Table="Flows"; Measure="Suspended Flows"},
+      @{Table="Environments"; Measure="Total Capacity GB"}) `
+    "Environment Matrix"
 
 $pageDefs = @{
     executive = @{
-        displayName = "Executive Summary"
+        displayName = "Executive Command Center"
         visuals = @(
-            (New-SlicerVisual "slicerEnvExec" 20 10 175 55 50 "Environments" "DisplayName" "Environment")
-            (New-CardVisual "cardExecEnv" 210 10 145 55 100 "Environments" "Total Environments" "Environments")
-            (New-CardVisual "cardExecApps" 375 10 145 55 200 "Apps" "Total Apps" "Apps")
-            (New-CardVisual "cardExecFlows" 540 10 145 55 300 "Flows" "Total Flows" "Flows")
-            (New-CardVisual "cardExecConn" 705 10 145 55 400 "Connectors" "Total Connectors" "Connectors")
-            (New-CardVisual "cardExecAgents" 20 275 145 55 450 "CopilotAgents" "Total Agents" "Agents")
-            (New-GaugeVisual "gaugeGovScore" 20 80 280 185 1000 "Environments" "Governance Score" "Governance Score")
-            (New-GaugeVisual "gaugeSuspRate" 315 80 280 185 2000 "Flows" "Suspension Rate" "Suspension Rate")
-            (New-GaugeVisual "gaugeStaleRate" 610 80 280 185 3000 "Apps" "Stale App Rate" "Stale App Rate")
-            (New-TreemapVisual "tmEnvTypes" 20 275 430 195 5000 "Environments" "EnvironmentType" "Apps" "Total Apps" "Environments by Type")
-            (New-ColumnChartVisual "colGrowth" 465 275 430 195 6000 "Environments" "DisplayName" "Apps" "Apps Created Last 30d" "Resource Growth (30d)")
+            # Full-width KPI banner
+            (New-CardVisual "cardExecEnv" 20 20 120 80 100 "Environments" "Total Environments" "Environments")
+            (New-CardVisual "cardExecApps" 155 20 120 80 200 "Apps" "Total Apps" "Apps")
+            (New-CardVisual "cardExecFlows" 290 20 120 80 300 "Flows" "Total Flows" "Flows")
+            (New-CardVisual "cardExecConn" 425 20 120 80 400 "Connectors" "Total Connectors" "Connectors")
+            (New-CardVisual "cardExecAgents" 560 20 120 80 500 "CopilotAgents" "Total Agents" "Agents")
+            (New-CardVisual "cardExecDlp" 695 20 120 80 600 "DlpPolicies" "Total DLP Policies" "DLP Policies")
+            # 3 gauges
+            (New-GaugeVisual "gaugeGovScore" 20 120 280 240 1000 "Environments" "Governance Score" "Governance Score")
+            (New-GaugeVisual "gaugeFlowHealth" 315 120 280 240 2000 "Environments" "Flow Health Rate" "Flow Health Rate")
+            (New-GaugeVisual "gaugeSecCoverage" 610 120 280 240 3000 "Environments" "Security Coverage" "Security Coverage")
+            # Treemap + Column chart
+            (New-TreemapVisual "tmEnvResources" 905 120 355 240 5000 "Environments" "DisplayName" "Environments" "Total Resources" "Environments by Resources")
+            # Environment matrix
             $execMatrix
+            # Resource distribution
+            (New-ColumnChartVisual "colResDist" 20 555 1220 155 6000 "Environments" "DisplayName" "Environments" "Total Resources" "Resource Distribution by Environment")
         )
     }
     environments = @{
-        displayName = "Environment Governance"
+        displayName = "Environment Health"
         visuals = @(
-            (New-CardVisual "cardEnvTotal" 20 20 145 80 100 "Environments" "Total Environments" "Environments")
-            (New-CardVisual "cardEnvProd" 185 20 145 80 200 "Environments" "Production Environments" "Production")
-            (New-CardVisual "cardEnvSandbox" 350 20 145 80 300 "Environments" "Sandbox Environments" "Sandbox")
-            (New-CardVisual "cardEnvUnsecured" 515 20 145 80 400 "Environments" "Unsecured Environments" "Unsecured")
-            (New-CardVisual "cardEnvSecRate" 680 20 145 80 500 "Environments" "Env Security Rate" "Security Rate")
-            (New-DonutVisual "donutEnvType2" 20 120 430 260 1000 "Environments" "EnvironmentType" "Total Environments" "Environment Types")
-            (New-BarChartVisual "barCapacity2" 470 120 430 260 2000 "Environments" "DisplayName" "Total Capacity GB" "Capacity by Environment")
-            (New-TableVisual "tblEnv2" 20 400 880 300 3000 "Environments" @("DisplayName","EnvironmentType","Region","IsDataverseEnabled","DatabaseUsedMb","FileUsedMb","SecurityGroupId") "Environment Details")
+            # Cards row
+            (New-CardVisual "cardEnvTotal" 20 20 120 80 100 "Environments" "Total Environments" "Total")
+            (New-CardVisual "cardEnvProd" 155 20 120 80 200 "Environments" "Production Environments" "Production")
+            (New-CardVisual "cardEnvSandbox" 290 20 120 80 300 "Environments" "Sandbox Environments" "Sandbox")
+            (New-CardVisual "cardEnvDev" 425 20 120 80 350 "Environments" "Developer Environments" "Developer")
+            (New-CardVisual "cardEnvDefault" 560 20 120 80 375 "Environments" "Default Environments" "Default")
+            (New-CardVisual "cardEnvDataverse" 695 20 120 80 400 "Environments" "Dataverse Enabled" "Dataverse")
+            # Chart row: donut + bar + gauge
+            (New-DonutVisual "donutEnvType" 20 120 380 240 1000 "Environments" "EnvironmentType" "Total Environments" "Environment Types")
+            (New-BarChartVisual "barCapacity" 415 120 430 240 2000 "Environments" "DisplayName" "Total Capacity GB" "Capacity by Environment")
+            (New-GaugeVisual "gaugeEnvSec" 860 120 185 120 3000 "Environments" "Env Security Rate" "Security Rate")
+            (New-CardVisual "cardEnvUnsecured" 860 255 185 105 3500 "Environments" "Unsecured Environments" "Unsecured Environments")
+            # Detail table
+            (New-TableVisual "tblEnvDetails" 20 380 1220 320 4000 "Environments" @("DisplayName","EnvironmentType","Region","State","IsDefault","IsDataverseEnabled","DatabaseUsedMb","FileUsedMb","LogUsedMb","SecurityGroupId","CreatedTime","LastModifiedTime") "Environment Details")
         )
     }
     apps = @{
-        displayName = "App Inventory & Risk"
+        displayName = "App Portfolio"
         visuals = @(
+            # Slicer + cards
             (New-SlicerVisual "slicerEnvApps" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
-            (New-CardVisual "cardAppTotal" 210 20 120 80 100 "Apps" "Total Apps" "Apps")
-            (New-CardVisual "cardAppStale" 345 20 120 80 200 "Apps" "Stale Apps (90d)" "Stale")
-            (New-CardVisual "cardAppOrphan" 480 20 120 80 300 "Apps" "Orphaned Apps" "Orphaned")
-            (New-CardVisual "cardAppWide" 615 20 120 80 400 "Apps" "Widely Shared Apps" "Widely Shared")
-            (New-CardVisual "cardAppBypass" 750 20 120 80 500 "Apps" "Bypass Consent Apps" "Bypass Consent")
-            (New-DonutVisual "donutAppType2" 20 120 430 240 1000 "Apps" "AppType" "Total Apps" "App Types")
-            (New-BarChartVisual "barAppEnv2" 470 120 430 240 2000 "Apps" "EnvironmentName" "Total Apps" "Apps by Environment")
-            (New-ColumnChartVisual "colAppGrowth" 20 380 430 320 3000 "Apps" "CreatedTime" "Apps" "Total Apps" "App Creation Trend")
-            (New-TableVisual "tblApps2" 470 380 430 320 4000 "Apps" @("DisplayName","AppType","OwnerDisplayName","EnvironmentName","SharedUsersCount","LastModifiedTime") "App Details")
+            (New-CardVisual "cardAppTotal" 210 20 120 80 100 "Apps" "Total Apps" "Total Apps")
+            (New-CardVisual "cardAppCanvas" 345 20 120 80 200 "Apps" "Canvas Apps" "Canvas")
+            (New-CardVisual "cardAppModel" 480 20 120 80 300 "Apps" "Model-Driven Apps" "Model-Driven")
+            (New-CardVisual "cardAppPremium" 615 20 120 80 400 "Apps" "Premium API Apps" "Premium API")
+            (New-CardVisual "cardAppStale" 750 20 120 80 500 "Apps" "Stale Apps (90d)" "Stale (90d)")
+            (New-CardVisual "cardAppOrphan" 885 20 120 80 550 "Apps" "Orphaned Apps" "Orphaned")
+            # Chart row 1: donut + bar
+            (New-DonutVisual "donutAppType" 20 120 430 240 1000 "Apps" "AppType" "Total Apps" "App Types")
+            (New-BarChartVisual "barAppOwners" 465 120 430 240 2000 "Apps" "OwnerDisplayName" "Total Apps" "Top App Owners")
+            # Chart row 2: donut + bar
+            (New-DonutVisual "donutAppSolution" 910 120 350 240 2500 "Apps" "IsSolutionAware" "Total Apps" "Solution Awareness")
+            # Detail table
+            (New-TableVisual "tblApps" 20 380 1220 320 4000 "Apps" @("DisplayName","AppType","OwnerDisplayName","OwnerEmail","UsesPremiumApi","SharedUsersCount","StalenessStatus","IsSolutionAware","EnvironmentName","LastModifiedTime") "App Details")
         )
     }
     flows = @{
-        displayName = "Flow Health & Operations"
+        displayName = "Flow Operations"
         visuals = @(
+            # Slicer + cards
             (New-SlicerVisual "slicerEnvFlows" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
-            (New-CardVisual "cardFlowTotal" 210 20 120 80 100 "Flows" "Total Flows" "Flows")
+            (New-CardVisual "cardFlowTotal" 210 20 120 80 100 "Flows" "Total Flows" "Total")
             (New-CardVisual "cardFlowActive" 345 20 120 80 200 "Flows" "Active Flows" "Active")
             (New-CardVisual "cardFlowSusp" 480 20 120 80 300 "Flows" "Suspended Flows" "Suspended")
-            (New-CardVisual "cardFlowSuspRate" 615 20 120 80 400 "Flows" "Suspension Rate" "Suspension Rate")
-            (New-CardVisual "cardFlowStale" 750 20 120 80 500 "Flows" "Stale Flows (90d)" "Stale")
-            (New-DonutVisual "donutFlowState2" 20 120 280 240 1000 "Flows" "State" "Total Flows" "Flow States")
-            (New-BarChartVisual "barFlowEnv2" 315 120 280 240 2000 "Flows" "EnvironmentName" "Total Flows" "Flows by Environment")
-            (New-DonutVisual "donutTrigger" 610 120 280 240 3000 "Flows" "TriggerType" "Total Flows" "Trigger Types")
-            (New-BarChartVisual "barSuspReason" 20 380 430 320 4000 "Flows" "SuspensionReason" "Suspended Flows" "Suspension Reasons")
-            (New-TableVisual "tblFlows2" 470 380 430 320 5000 "Flows" @("DisplayName","State","CreatorDisplayName","TriggerType","EnvironmentName","SuspensionReason","LastModifiedTime") "Flow Details")
-        )
-    }
-    connectors = @{
-        displayName = "Connector Risk Analysis"
-        visuals = @(
-            (New-SlicerVisual "slicerEnvConn" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
-            (New-CardVisual "cardConnTotal" 210 20 135 80 100 "Connectors" "Total Connectors" "Connectors")
-            (New-CardVisual "cardConnPrem" 360 20 135 80 200 "Connectors" "Premium Connectors" "Premium")
-            (New-CardVisual "cardConnCustom" 510 20 135 80 300 "Connectors" "Custom Connectors" "Custom")
-            (New-CardVisual "cardConnStd" 660 20 135 80 400 "Connectors" "Standard Connectors" "Standard")
-            (New-DonutVisual "donutConnTier2" 20 120 430 240 1000 "Connectors" "Tier" "Total Connectors" "Tier Distribution")
-            (New-TreemapVisual "tmTopConn" 470 120 430 240 2000 "Connectors" "DisplayName" "Connectors" "Total Connectors" "Top Connectors")
-            (New-BarChartVisual "barConnEnv2" 20 380 430 320 3000 "Connectors" "EnvironmentName" "Total Connectors" "Connectors by Environment")
-            (New-TableVisual "tblConn2" 470 380 430 320 4000 "Connectors" @("DisplayName","Tier","Publisher","IsCustom","EnvironmentName") "Connector Details")
-        )
-    }
-    dlp = @{
-        displayName = "DLP & Compliance"
-        visuals = @(
-            (New-CardVisual "cardDlpTotal" 20 20 145 80 100 "DlpPolicies" "Total DLP Policies" "DLP Policies")
-            (New-CardVisual "cardDlpEnabled" 185 20 145 80 200 "DlpPolicies" "Enabled Policies" "Enabled")
-            (New-CardVisual "cardDlpBiz" 350 20 145 80 300 "DlpConnectorRules" "Business Connectors" "Business")
-            (New-CardVisual "cardDlpNonBiz" 515 20 145 80 400 "DlpConnectorRules" "Non-Business Connectors" "Non-Business")
-            (New-CardVisual "cardDlpBlocked" 680 20 145 80 500 "DlpConnectorRules" "Blocked Connectors" "Blocked")
-            (New-DonutVisual "donutDlpClass2" 20 120 430 240 1000 "DlpConnectorRules" "Classification" "Total Connector Rules" "Classification Breakdown")
-            (New-BarChartVisual "barDlpScope" 470 120 430 240 2000 "DlpPolicies" "EnvironmentScope" "Total DLP Policies" "Policy Scope")
-            (New-TableVisual "tblDlpPol2" 20 380 880 150 3000 "DlpPolicies" @("DisplayName","IsEnabled","EnvironmentScope","LastModifiedTime") "DLP Policies")
-            (New-TableVisual "tblDlpRules2" 20 545 880 165 4000 "DlpConnectorRules" @("PolicyName","ConnectorName","Classification") "Connector Rules")
-        )
-    }
-    endpoints = @{
-        displayName = "Endpoint & API Risk"
-        visuals = @(
-            (New-SlicerVisual "slicerEnvEndpt" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
-            (New-SlicerVisual "slicerHttpType" 210 20 170 80 55 "AppConnectorRefs" "HttpConnectorType" "HTTP Connector Type")
-            (New-CardVisual "cardEndptHttpApp" 400 20 105 80 100 "AppConnectorRefs" "App HTTP Connector Refs" "App HTTP Refs")
-            (New-CardVisual "cardEndptHttpRaw" 520 20 105 80 200 "AppConnectorRefs" "App HTTP Raw Refs" "HTTP (Raw)")
-            (New-CardVisual "cardEndptHttpEntra" 640 20 105 80 300 "AppConnectorRefs" "App HTTP Entra Refs" "HTTP (Entra)")
-            (New-CardVisual "cardEndptFlowHttp" 760 20 105 80 400 "FlowActions" "Flow HTTP Actions" "Flow HTTP")
-            (New-BarChartVisual "barTopConnectors" 20 120 430 240 1000 "AppConnectorRefs" "DisplayName" "Total Connector References" "Top Connectors")
-            (New-TreemapVisual "tmActionTypes" 470 120 430 240 2000 "FlowActions" "ActionType" "FlowActions" "Total Flow Actions" "Action Types")
-            (New-TableVisual "tblAppEndpoints" 20 380 880 160 3000 "AppConnectorRefs" @("DisplayName","ConnectorId","HttpConnectorType","EndpointUrl","DataSources") "App Endpoint Details")
-            (New-TableVisual "tblFlowEndpoints" 20 555 880 160 4000 "FlowActions" @("Name","ActionType","ConnectorId","HttpConnectorType","BaseUrl","EndpointUrl","OperationId") "Flow Endpoint Details")
-        )
-    }
-    lifecycle = @{
-        displayName = "Shadow IT & Lifecycle"
-        visuals = @(
-            (New-SlicerVisual "slicerEnvLife" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
-            (New-CardVisual "cardLifeStaleApp" 210 20 120 80 100 "Apps" "Stale Apps (90d)" "Stale Apps")
-            (New-CardVisual "cardLifeStaleFlow" 345 20 120 80 200 "Flows" "Stale Flows (90d)" "Stale Flows")
-            (New-CardVisual "cardLifeOrphan" 480 20 120 80 300 "Apps" "Orphaned Apps" "Orphaned")
-            (New-CardVisual "cardLifeUnmanaged" 615 20 120 80 400 "Flows" "Unmanaged Flows" "Unmanaged")
-            (New-CardVisual "cardLifeUnsecured" 750 20 120 80 500 "Environments" "Unsecured Environments" "Unsecured Envs")
-            (New-DonutVisual "donutStaleActive" 20 120 280 240 1000 "Apps" "StalenessStatus" "Total Apps" "Stale vs Active Apps")
-            (New-DonutVisual "donutManagedFlow" 315 120 280 240 2000 "Flows" "ManagedStatus" "Total Flows" "Flow Lifecycle")
-            (New-BarChartVisual "barTopCreators" 610 120 280 240 3000 "Flows" "CreatorDisplayName" "Total Flows" "Top Creators")
-            (New-TableVisual "tblStaleApps" 20 380 880 320 4000 "Apps" @("DisplayName","AppType","OwnerDisplayName","EnvironmentName","LastModifiedTime") "Stale App Details")
+            (New-CardVisual "cardFlowStopped" 615 20 120 80 400 "Flows" "Stopped Flows" "Stopped")
+            (New-CardVisual "cardFlowSolution" 750 20 120 80 450 "Flows" "Solution-Aware Flows" "Solution-Aware")
+            (New-CardVisual "cardFlowManaged" 885 20 120 80 500 "Flows" "Managed Flows" "Managed")
+            # Chart row 1: donut + bar
+            (New-DonutVisual "donutFlowState" 20 120 430 240 1000 "Flows" "State" "Total Flows" "Flow States")
+            (New-BarChartVisual "barSuspReason" 465 120 430 240 2000 "Flows" "SuspensionReason" "Suspended Flows" "Suspension Reasons")
+            # Chart row 2: donut + bar
+            (New-DonutVisual "donutTrigger" 910 120 350 120 3000 "Flows" "TriggerType" "Total Flows" "Trigger Types")
+            (New-BarChartVisual "barFlowCreators" 910 255 350 105 3500 "Flows" "CreatorDisplayName" "Total Flows" "Top Flow Creators")
+            # Line chart: activity trend
+            (New-LineChartVisual "lineFlowActivity" 20 380 600 160 4000 "Flows" "LastModifiedTime" "Flows" "Total Flows" "Flows by Last Modified Month")
+            # Detail table
+            (New-TableVisual "tblFlows" 20 555 1220 155 5000 "Flows" @("DisplayName","State","TriggerType","CreatorDisplayName","IsManaged","IsSolutionAware","SuspensionReason","EnvironmentName","LastModifiedTime") "Flow Details")
         )
     }
     agents = @{
         displayName = "Copilot Agents"
         visuals = @(
+            # Slicer + cards
             (New-SlicerVisual "slicerEnvAgents" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
-            (New-CardVisual "cardAgentTotal" 210 20 120 80 100 "CopilotAgents" "Total Agents" "Agents")
+            (New-CardVisual "cardAgentTotal" 210 20 120 80 100 "CopilotAgents" "Total Agents" "Total Agents")
             (New-CardVisual "cardAgentDecl" 345 20 120 80 200 "CopilotAgents" "Declarative Agents" "Declarative")
             (New-CardVisual "cardAgentCustom" 480 20 120 80 300 "CopilotAgents" "Custom Agents" "Custom")
             (New-CardVisual "cardAgentActive" 615 20 120 80 400 "CopilotAgents" "Active Agents" "Active")
-            (New-CardVisual "cardAgentManaged" 750 20 120 80 500 "CopilotAgents" "Managed Agents" "Managed")
-            (New-DonutVisual "donutAgentType" 20 120 280 240 1000 "CopilotAgents" "AgentType" "Total Agents" "Agent Types (Declarative vs Custom)")
-            (New-BarChartVisual "barAgentEnv" 315 120 280 240 2000 "CopilotAgents" "EnvironmentName" "Total Agents" "Agents by Environment")
-            (New-DonutVisual "donutAgentAuth" 610 120 280 240 3000 "CopilotAgents" "AuthenticationMode" "Total Agents" "Authentication Modes")
-            (New-TreemapVisual "tmCompTypes" 20 380 430 160 4000 "CopilotComponents" "ComponentType" "CopilotComponents" "Total Components" "Component Types")
-            (New-BarChartVisual "barAgentCreators" 470 380 430 160 5000 "CopilotAgents" "CreatedByName" "Total Agents" "Top Agent Creators")
-            (New-TableVisual "tblAgents" 20 555 880 160 6000 "CopilotAgents" @("DisplayName","AgentType","State","StatusReason","Language","AuthenticationMode","EnvironmentName","TopicCount","KnowledgeSourceCount","TotalComponents","PublishedOn") "Agent Details")
+            (New-CardVisual "cardAgentPublished" 750 20 120 80 450 "CopilotAgents" "Published Agents" "Published")
+            (New-CardVisual "cardAgentManaged" 885 20 120 80 500 "CopilotAgents" "Managed Agents" "Managed")
+            # Chart row 1: donut + bar
+            (New-DonutVisual "donutAgentType" 20 120 380 240 1000 "CopilotAgents" "AgentType" "Total Agents" "Agent Types")
+            (New-BarChartVisual "barAgentEnv" 415 120 430 240 2000 "CopilotAgents" "EnvironmentName" "Total Agents" "Agents by Environment")
+            # Chart row 2: donut + treemap
+            (New-DonutVisual "donutAgentAuth" 860 120 185 120 3000 "CopilotAgents" "AuthenticationMode" "Total Agents" "Auth Modes")
+            (New-TreemapVisual "tmCompTypes" 860 255 185 105 3500 "CopilotComponents" "ComponentType" "CopilotComponents" "Total Components" "Component Types")
+            # Bar + component cards
+            (New-BarChartVisual "barAgentCreators" 20 380 430 120 4000 "CopilotAgents" "CreatedByName" "Total Agents" "Top Agent Creators")
+            (New-CardVisual "cardTopics" 465 380 145 55 4100 "CopilotAgents" "Total Topics" "Topics")
+            (New-CardVisual "cardKnowledge" 625 380 145 55 4200 "CopilotAgents" "Total Knowledge Sources" "Knowledge Sources")
+            (New-CardVisual "cardSkills" 785 380 145 55 4300 "CopilotAgents" "Total Skills" "Skills")
+            # Detail table
+            (New-TableVisual "tblAgents" 20 455 1220 255 5000 "CopilotAgents" @("DisplayName","AgentType","State","StatusReason","AuthenticationMode","EnvironmentName","TopicCount","KnowledgeSourceCount","SkillCount","PublishedOn","CreatedByName") "Agent Summary")
         )
     }
-    # --- Detail Pages ---
-    "app-details" = @{
-        displayName = "App Details"
+    "connectors-dlp" = @{
+        displayName = "Connector & DLP Governance"
         visuals = @(
-            (New-SlicerVisual "slicerAppDetail" 20 20 170 80 50 "Apps" "DisplayName" "Select App")
-            (New-TableVisual "tblAppInfo" 20 120 880 280 1000 "Apps" @("DisplayName","AppType","Status","OwnerDisplayName","OwnerEmail","EnvironmentName","SharedUsersCount","SharedGroupsCount","UsesPremiumApi","UsesCustomApi","IsSolutionAware","BypassConsent","CreatedTime","LastModifiedTime") "App Info")
-            (New-TableVisual "tblAppConnectors" 20 420 880 280 2000 "AppConnectorRefs" @("DisplayName","ConnectorId","EndpointUrl","DataSources") "App Connectors")
+            # Cards row
+            (New-CardVisual "cardConnTotal" 20 20 120 80 100 "Connectors" "Total Connectors" "Connectors")
+            (New-CardVisual "cardConnPrem" 155 20 120 80 200 "Connectors" "Premium Connectors" "Premium")
+            (New-CardVisual "cardConnCustom" 290 20 120 80 300 "Connectors" "Custom Connectors" "Custom")
+            (New-CardVisual "cardConnStd" 425 20 120 80 400 "Connectors" "Standard Connectors" "Standard")
+            (New-CardVisual "cardDlpTotal" 560 20 120 80 500 "DlpPolicies" "Total DLP Policies" "DLP Policies")
+            (New-CardVisual "cardDlpBlocked" 695 20 120 80 600 "DlpConnectorRules" "Blocked Connectors" "Blocked")
+            # Chart row 1: connector tier donut + top connectors by flow usage
+            (New-DonutVisual "donutConnTier" 20 120 430 240 1000 "Connectors" "Tier" "Total Connectors" "Connector Tiers")
+            (New-BarChartVisual "barTopConnFlow" 465 120 430 240 2000 "FlowConnectionRefs" "ConnectorId" "Flow Connection Count" "Top Connectors by Flow Usage")
+            # Chart row 2: DLP classification donut + DLP policies by rule count
+            (New-DonutVisual "donutDlpClass" 910 120 350 240 2500 "DlpConnectorRules" "Classification" "Total Connector Rules" "DLP Classifications")
+            # Detail table: DLP connector rules
+            (New-TableVisual "tblDlpRules" 20 380 1220 320 4000 "DlpConnectorRules" @("PolicyName","ConnectorName","Classification") "DLP Connector Rules")
         )
     }
-    "flow-details" = @{
-        displayName = "Flow Details"
+    endpoints = @{
+        displayName = "Endpoint & API Security"
         visuals = @(
-            (New-SlicerVisual "slicerFlowDetail" 20 20 170 80 50 "Flows" "DisplayName" "Select Flow")
-            (New-TableVisual "tblFlowInfo" 20 120 880 200 1000 "Flows" @("DisplayName","State","CreatorDisplayName","TriggerType","EnvironmentName","IsSolutionAware","IsManaged","SuspensionReason","CreatedTime","LastModifiedTime") "Flow Info")
-            (New-TableVisual "tblFlowActions" 20 340 880 180 2000 "FlowActions" @("Name","ActionType","ConnectorId","BaseUrl","EndpointUrl","OperationId") "Flow Actions")
-            (New-TableVisual "tblFlowTriggers" 20 535 880 180 3000 "FlowTriggers" @("Name","TriggerType","ConnectorId","BaseUrl","EndpointUrl","OperationId") "Flow Triggers")
+            # Slicer + cards
+            (New-SlicerVisual "slicerEnvEndpt" 20 20 170 80 50 "Environments" "DisplayName" "Environment")
+            (New-CardVisual "cardEndptActions" 210 20 120 80 100 "FlowActions" "Total Flow Actions" "Flow Actions")
+            (New-CardVisual "cardEndptWithUrl" 345 20 120 80 200 "FlowActions" "Actions with Endpoints" "With Endpoints")
+            (New-CardVisual "cardEndptHttpRaw" 480 20 120 80 300 "FlowActions" "Flow HTTP Raw Actions" "HTTP Raw")
+            (New-CardVisual "cardEndptHttpEntra" 615 20 120 80 400 "FlowActions" "Flow HTTP Entra Actions" "HTTP Entra")
+            (New-CardVisual "cardEndptAppRefs" 750 20 120 80 450 "AppConnectorRefs" "Total Connector References" "App Conn Refs")
+            (New-CardVisual "cardEndptAppUrl" 885 20 120 80 500 "AppConnectorRefs" "App Refs with Endpoints" "App Endpoints")
+            # Donut row: HTTP types for flows + apps
+            (New-DonutVisual "donutFlowHttp" 20 120 430 240 1000 "FlowActions" "HttpConnectorType" "Total Flow Actions" "Flow HTTP Connector Types")
+            (New-DonutVisual "donutAppHttp" 465 120 430 240 2000 "AppConnectorRefs" "HttpConnectorType" "Total Connector References" "App HTTP Connector Types")
+            # Bar: top endpoint domains
+            (New-BarChartVisual "barTopDomains" 910 120 350 240 2500 "FlowActions" "BaseUrl" "Total Flow Actions" "Top Endpoint Domains")
+            # Detail tables
+            (New-TableVisual "tblFlowEndpoints" 20 380 600 320 3000 "FlowActions" @("Name","ActionType","ConnectorId","HttpConnectorType","EndpointUrl","BaseUrl") "Flow Actions with Endpoints")
+            (New-TableVisual "tblAppEndpoints" 635 380 625 320 4000 "AppConnectorRefs" @("DisplayName","ConnectorId","HttpConnectorType","EndpointUrl","DataSources") "App Connector Refs with Endpoints")
         )
     }
+    risk = @{
+        displayName = "Risk & Shadow IT"
+        visuals = @(
+            # Cards row
+            (New-CardVisual "cardRiskOrphApps" 20 20 120 80 100 "Apps" "Orphaned Apps" "Orphaned Apps")
+            (New-CardVisual "cardRiskOrphFlows" 155 20 120 80 200 "Flows" "Orphaned Flows" "Orphaned Flows")
+            (New-CardVisual "cardRiskStaleApps" 290 20 120 80 300 "Apps" "Stale Apps (90d)" "Stale Apps")
+            (New-CardVisual "cardRiskStaleFlows" 425 20 120 80 400 "Flows" "Stale Flows (90d)" "Stale Flows")
+            (New-CardVisual "cardRiskBypass" 560 20 120 80 500 "Apps" "Bypass Consent Apps" "Bypass Consent")
+            (New-CardVisual "cardRiskUnmanaged" 695 20 120 80 600 "Flows" "Unmanaged Flows" "Unmanaged Flows")
+            # Gauge: Shadow IT Rate
+            (New-GaugeVisual "gaugeShadowIT" 20 120 280 240 1000 "Environments" "Shadow IT Rate" "Shadow IT Rate")
+            # Donuts: managed vs unmanaged, solution-aware
+            (New-DonutVisual "donutManagedFlow" 315 120 280 240 2000 "Flows" "ManagedStatus" "Total Flows" "Managed vs Unmanaged Flows")
+            (New-DonutVisual "donutSolutionApps" 610 120 280 240 3000 "Apps" "IsSolutionAware" "Total Apps" "Solution Awareness (Apps)")
+            # Bar: top owners with unmanaged
+            (New-BarChartVisual "barUnmanagedOwners" 905 120 355 240 3500 "Flows" "CreatorDisplayName" "Unmanaged Flows" "Top Owners: Unmanaged Resources")
+            # Matrix: Environment risk view
+            ,(New-MatrixVisual "matrixRisk" 20 380 1220 160 5000 `
+                @(@{Table="Environments"; Column="DisplayName"}) `
+                @(@{Table="Apps"; Measure="Orphaned Apps"},
+                  @{Table="Flows"; Measure="Stale Flows (90d)"},
+                  @{Table="Flows"; Measure="Unmanaged Flows"},
+                  @{Table="Environments"; Measure="Unsecured Environments"}) `
+                "Risk by Environment")
+            # Detail table
+            (New-TableVisual "tblRiskItems" 20 555 1220 155 6000 "Apps" @("DisplayName","AppType","OwnerDisplayName","OwnerEmail","StalenessStatus","IsSolutionAware","BypassConsent","EnvironmentName") "Risk Items (Apps)")
+        )
+    }
+    makers = @{
+        displayName = "Maker Activity & Ownership"
+        visuals = @(
+            # Cards row
+            (New-CardVisual "cardMakerAppOwners" 20 20 145 80 100 "Apps" "Unique App Owners" "App Owners")
+            (New-CardVisual "cardMakerFlowCreators" 180 20 145 80 200 "Flows" "Unique Flow Creators" "Flow Creators")
+            (New-CardVisual "cardMakerAgentCreators" 340 20 145 80 300 "CopilotAgents" "Unique Agent Creators" "Agent Creators")
+            (New-CardVisual "cardMakerAvgApps" 500 20 145 80 400 "Apps" "Avg Apps Per Owner" "Avg Apps/Owner")
+            (New-CardVisual "cardMakerAvgFlows" 660 20 145 80 500 "Flows" "Avg Flows Per Creator" "Avg Flows/Creator")
+            # Bar: top makers by total resources (apps)
+            (New-BarChartVisual "barTopMakers" 20 120 600 240 1000 "Apps" "OwnerDisplayName" "Total Apps" "Top Makers by App Count")
+            # Donut: maker concentration
+            (New-DonutVisual "donutMakerConcentration" 635 120 625 240 2000 "Apps" "OwnerDisplayName" "Total Apps" "Maker Concentration")
+            # Matrix: top makers breakdown
+            ,(New-MatrixVisual "matrixMakers" 20 380 1220 160 3000 `
+                @(@{Table="Apps"; Column="OwnerDisplayName"}) `
+                @(@{Table="Apps"; Measure="Total Apps"},
+                  @{Table="Apps"; Measure="Premium API Apps"},
+                  @{Table="Apps"; Measure="Stale Apps (90d)"}) `
+                "Maker Activity Matrix")
+            # Detail table
+            (New-TableVisual "tblMakers" 20 555 1220 155 4000 "Apps" @("OwnerDisplayName","OwnerEmail","EnvironmentName","AppType","SharedUsersCount","IsSolutionAware","LastModifiedTime") "Maker Directory")
+        )
+    }
+    connections = @{
+        displayName = "Connection Intelligence"
+        visuals = @(
+            # Cards row
+            (New-CardVisual "cardConnxTotal" 20 20 145 80 100 "Connections" "Total Connections" "Connections")
+            (New-CardVisual "cardConnxShared" 180 20 145 80 200 "Connections" "Shared Connections" "Shared")
+            (New-CardVisual "cardConnxActive" 340 20 145 80 300 "Connections" "Active Connections" "Active")
+            (New-CardVisual "cardConnxTypes" 500 20 145 80 400 "Connections" "Connector Types Used" "Connector Types")
+            # Chart row: donut + bar
+            (New-DonutVisual "donutConnxStatus" 20 120 430 240 1000 "Connections" "Status" "Total Connections" "Connection Status")
+            (New-BarChartVisual "barConnxByConnector" 465 120 430 240 2000 "Connections" "DisplayName" "Total Connections" "Top Connectors by Connection Count")
+            # Bar: top connection creators
+            (New-BarChartVisual "barConnxCreators" 910 120 350 240 3000 "Connections" "CreatedByName" "Total Connections" "Top Connection Creators")
+            # Detail table
+            (New-TableVisual "tblConnxDetails" 20 380 1220 320 4000 "Connections" @("DisplayName","CreatedByName","CreatedByEmail","EnvironmentName","Status","IsShared","CreatedTime") "Connection Details")
+        )
+    }
+    # --- Tier 4: Detail/Drill-Down Pages ---
     "env-details" = @{
-        displayName = "Environment Details"
+        displayName = "Environment Detail"
         visuals = @(
             (New-SlicerVisual "slicerEnvDetail" 20 20 170 80 50 "Environments" "DisplayName" "Select Environment")
             (New-CardVisual "cardEnvDetApps" 210 20 105 80 100 "Apps" "Total Apps" "Apps")
             (New-CardVisual "cardEnvDetFlows" 330 20 105 80 200 "Flows" "Total Flows" "Flows")
             (New-CardVisual "cardEnvDetConn" 450 20 105 80 300 "Connectors" "Total Connectors" "Connectors")
-            (New-CardVisual "cardEnvDetAgents" 570 20 105 80 350 "CopilotAgents" "Total Agents" "Agents")
-            (New-CardVisual "cardEnvDetUnsec" 690 20 105 80 400 "Environments" "Unsecured Environments" "Unsecured")
+            (New-CardVisual "cardEnvDetConnx" 570 20 105 80 350 "Connections" "Total Connections" "Connections")
+            (New-CardVisual "cardEnvDetAgents" 690 20 105 80 400 "CopilotAgents" "Total Agents" "Agents")
             (New-CardVisual "cardEnvDetCap" 810 20 90 80 500 "Environments" "Total Capacity GB" "Capacity GB")
-            (New-TableVisual "tblEnvInfo" 20 120 880 200 1000 "Environments" @("DisplayName","EnvironmentType","Region","State","IsDefault","IsDataverseEnabled","SecurityGroupId","DatabaseUsedMb","FileUsedMb","LogUsedMb","CreatedTime","LastModifiedTime") "Environment Info")
-            (New-TableVisual "tblEnvApps" 20 340 290 360 2000 "Apps" @("DisplayName","AppType","OwnerDisplayName","Status") "Environment Apps")
-            (New-TableVisual "tblEnvFlows" 325 340 290 360 3000 "Flows" @("DisplayName","State","TriggerType","CreatorDisplayName") "Environment Flows")
-            (New-TableVisual "tblEnvAgents" 630 340 270 360 4000 "CopilotAgents" @("DisplayName","AgentType","State","TotalComponents") "Environment Agents")
+            # Charts
+            (New-BarChartVisual "barEnvDetAppType" 20 120 430 240 1000 "Apps" "AppType" "Total Apps" "Apps by Type")
+            (New-BarChartVisual "barEnvDetFlowState" 465 120 430 240 2000 "Flows" "State" "Total Flows" "Flows by State")
+            # Tables
+            (New-TableVisual "tblEnvDetApps" 20 380 400 320 3000 "Apps" @("DisplayName","AppType","OwnerDisplayName","Status") "Apps in Environment")
+            (New-TableVisual "tblEnvDetFlows" 435 380 400 320 4000 "Flows" @("DisplayName","State","TriggerType","CreatorDisplayName") "Flows in Environment")
+            (New-TableVisual "tblEnvDetAgents" 850 380 410 320 5000 "CopilotAgents" @("DisplayName","AgentType","State","TotalComponents") "Agents in Environment")
         )
     }
-    "dlp-details" = @{
-        displayName = "DLP Policy Details"
+    "app-details" = @{
+        displayName = "App Detail"
         visuals = @(
-            (New-SlicerVisual "slicerDlpDetail" 20 20 170 80 50 "DlpPolicies" "DisplayName" "Select Policy")
-            (New-CardVisual "cardDlpDetRules" 210 20 120 80 100 "DlpConnectorRules" "Total Connector Rules" "Rules")
-            (New-CardVisual "cardDlpDetBiz" 345 20 120 80 200 "DlpConnectorRules" "Business Connectors" "Business")
-            (New-CardVisual "cardDlpDetBlocked" 480 20 120 80 300 "DlpConnectorRules" "Blocked Connectors" "Blocked")
-            (New-TableVisual "tblDlpInfo" 20 120 880 200 1000 "DlpPolicies" @("DisplayName","IsEnabled","PolicyType","EnvironmentScope","CreatedTime","LastModifiedTime") "Policy Info")
-            (New-TableVisual "tblDlpConnRules" 20 340 880 360 2000 "DlpConnectorRules" @("ConnectorName","Classification","PolicyName") "Connector Rules")
+            (New-SlicerVisual "slicerAppDetail" 20 20 170 80 50 "Apps" "DisplayName" "Select App")
+            (New-CardVisual "cardAppDetShared" 210 20 120 80 100 "Apps" "Total Shared Users" "Shared Users")
+            (New-CardVisual "cardAppDetGroups" 345 20 120 80 200 "Apps" "Avg Shared Users" "Shared Groups")
+            (New-CardVisual "cardAppDetConnRefs" 480 20 120 80 300 "AppConnectorRefs" "Total Connector References" "Connector Refs")
+            # App info table
+            (New-TableVisual "tblAppInfo" 20 120 1220 260 1000 "Apps" @("DisplayName","AppType","Status","OwnerDisplayName","OwnerEmail","EnvironmentName","SharedUsersCount","SharedGroupsCount","UsesPremiumApi","UsesCustomApi","IsSolutionAware","BypassConsent","AppVersion","CreatedTime","LastModifiedTime") "App Info")
+            # App connector references
+            (New-TableVisual "tblAppConnRefs" 20 400 1220 300 2000 "AppConnectorRefs" @("DisplayName","ConnectorId","HttpConnectorType","EndpointUrl","DataSources") "App Connector References")
+        )
+    }
+    "flow-details" = @{
+        displayName = "Flow Detail"
+        visuals = @(
+            (New-SlicerVisual "slicerFlowDetail" 20 20 170 80 50 "Flows" "DisplayName" "Select Flow")
+            (New-CardVisual "cardFlowDetActions" 210 20 120 80 100 "FlowActions" "Total Flow Actions" "Actions")
+            (New-CardVisual "cardFlowDetTriggers" 345 20 120 80 200 "FlowTriggers" "Total Flow Triggers" "Triggers")
+            (New-CardVisual "cardFlowDetConnRefs" 480 20 120 80 300 "FlowConnectionRefs" "Total Flow Connections" "Connection Refs")
+            # Flow info table
+            (New-TableVisual "tblFlowInfo" 20 120 1220 200 1000 "Flows" @("DisplayName","State","CreatorDisplayName","TriggerType","EnvironmentName","IsSolutionAware","IsManaged","SuspensionReason","CreatedTime","LastModifiedTime") "Flow Info")
+            # Flow actions + triggers
+            (New-TableVisual "tblFlowActions" 20 340 610 360 2000 "FlowActions" @("Name","ActionType","ConnectorId","BaseUrl","EndpointUrl","OperationId") "Flow Actions")
+            (New-TableVisual "tblFlowTriggers" 645 340 595 360 3000 "FlowTriggers" @("Name","TriggerType","ConnectorId","BaseUrl","EndpointUrl","OperationId") "Flow Triggers")
         )
     }
     "agent-details" = @{
-        displayName = "Agent Details"
+        displayName = "Agent Detail"
         visuals = @(
             (New-SlicerVisual "slicerAgentDetail" 20 20 170 80 50 "CopilotAgents" "DisplayName" "Select Agent")
             (New-CardVisual "cardAgentDetTopics" 210 20 120 80 100 "CopilotAgents" "Total Topics" "Topics")
             (New-CardVisual "cardAgentDetKnow" 345 20 120 80 200 "CopilotAgents" "Total Knowledge Sources" "Knowledge")
             (New-CardVisual "cardAgentDetSkills" 480 20 120 80 300 "CopilotAgents" "Total Skills" "Skills")
-            (New-CardVisual "cardAgentDetComps" 615 20 120 80 400 "CopilotAgents" "Total Agent Components" "Components")
-            (New-TableVisual "tblAgentInfo" 20 120 880 220 1000 "CopilotAgents" @("DisplayName","AgentType","SchemaName","State","StatusReason","Language","AuthenticationMode","AuthenticationTrigger","AccessControlPolicy","RuntimeProvider","Origin","Template","IsManaged","SolutionId","PublishedOn","PublishedByName","CreatedOn","CreatedByName","ModifiedOn") "Agent Info")
-            (New-TableVisual "tblAgentComps" 20 360 880 340 2000 "CopilotComponents" @("Name","ComponentType","Category","Description","Status","IsManaged","CreatedOn","ModifiedOn") "Agent Components")
+            (New-CardVisual "cardAgentDetGPT" 615 20 120 80 400 "CopilotComponents" "Custom GPT Components" "Custom GPT")
+            (New-CardVisual "cardAgentDetComps" 750 20 120 80 500 "CopilotAgents" "Total Agent Components" "Components")
+            # Agent info table
+            (New-TableVisual "tblAgentInfo" 20 120 1220 240 1000 "CopilotAgents" @("DisplayName","AgentType","SchemaName","State","StatusReason","Language","AuthenticationMode","AuthenticationTrigger","AccessControlPolicy","RuntimeProvider","Origin","Template","IsManaged","SolutionId","PublishedOn","PublishedByName","CreatedOn","CreatedByName","ModifiedOn") "Agent Info")
+            # Agent components
+            (New-TableVisual "tblAgentComps" 20 380 1220 320 2000 "CopilotComponents" @("Name","ComponentType","Category","Description","Status","IsManaged","CreatedOn","ModifiedOn") "Agent Components")
+        )
+    }
+    "dlp-details" = @{
+        displayName = "DLP Policy Detail"
+        visuals = @(
+            (New-SlicerVisual "slicerDlpDetail" 20 20 170 80 50 "DlpPolicies" "DisplayName" "Select Policy")
+            (New-CardVisual "cardDlpDetRules" 210 20 120 80 100 "DlpConnectorRules" "Total Connector Rules" "Rules")
+            (New-CardVisual "cardDlpDetBiz" 345 20 120 80 200 "DlpConnectorRules" "Business Connectors" "Business")
+            (New-CardVisual "cardDlpDetNonBiz" 480 20 120 80 300 "DlpConnectorRules" "Non-Business Connectors" "Non-Business")
+            (New-CardVisual "cardDlpDetBlocked" 615 20 120 80 400 "DlpConnectorRules" "Blocked Connectors" "Blocked")
+            # Policy info table
+            (New-TableVisual "tblDlpInfo" 20 120 1220 200 1000 "DlpPolicies" @("DisplayName","Description","IsEnabled","PolicyType","EnvironmentScope","CreatedTime","LastModifiedTime") "Policy Info")
+            # Connector rules
+            (New-TableVisual "tblDlpConnRules" 20 340 1220 360 2000 "DlpConnectorRules" @("ConnectorName","Classification","PolicyName","ConnectorId") "Connector Rules for Policy")
+        )
+    }
+    "connector-details" = @{
+        displayName = "Connector Detail"
+        visuals = @(
+            (New-SlicerVisual "slicerConnDetail" 20 20 170 80 50 "Connectors" "DisplayName" "Select Connector")
+            (New-CardVisual "cardConnDetConnx" 210 20 120 80 100 "Connections" "Total Connections" "Connections")
+            (New-CardVisual "cardConnDetFlowRefs" 345 20 120 80 200 "FlowConnectionRefs" "Total Flow Connections" "Flow Refs")
+            (New-CardVisual "cardConnDetAppRefs" 480 20 120 80 300 "AppConnectorRefs" "Total Connector References" "App Refs")
+            # Connections using this connector
+            (New-TableVisual "tblConnDetConnx" 20 120 1220 280 1000 "Connections" @("DisplayName","CreatedByName","CreatedByEmail","EnvironmentName","Status","IsShared","CreatedTime") "Connections Using This Connector")
+            # Flows using this connector
+            (New-TableVisual "tblConnDetFlows" 20 420 1220 280 2000 "FlowConnectionRefs" @("FlowKey","ConnectorId","ConnectionName","ConnectionUrl","EnvironmentId") "Flows Using This Connector")
         )
     }
 }
@@ -1342,7 +1511,7 @@ foreach ($pageName in $pageNames) {
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
-Write-Host " Enterprise Governance PBIP created!" -ForegroundColor Green
+Write-Host " Enterprise Governance PBIP v3 created!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Project: $OutputPath/$projectName.pbip" -ForegroundColor Cyan
@@ -1354,34 +1523,43 @@ Write-Host "     File > Options > Preview features > Power BI Project (.pbip)" -
 Write-Host "  2. Open: $OutputPath/$projectName.pbip" -ForegroundColor Gray
 Write-Host "  3. If CSVs move, update the CsvFolderPath parameter in Transform Data" -ForegroundColor Gray
 Write-Host ""
-Write-Host "12 Pages (8 governance + 4 detail):" -ForegroundColor Yellow
-Write-Host "  1. Executive Summary  — governance score, KPI gauges, environment treemap" -ForegroundColor Gray
-Write-Host "  2. Environment Gov.   — security posture, capacity, type distribution" -ForegroundColor Gray
-Write-Host "  3. App Inventory/Risk — staleness, orphans, sharing risk, bypass consent" -ForegroundColor Gray
-Write-Host "  4. Flow Health        — suspension analysis, trigger patterns, reliability" -ForegroundColor Gray
-Write-Host "  5. Connector Risk     — tier exposure, premium cost, top connectors treemap" -ForegroundColor Gray
-Write-Host "  6. DLP & Compliance   — policy coverage, classification, blocked connectors" -ForegroundColor Gray
-Write-Host "  7. Endpoint/API Risk  — connector endpoints, flow action URLs, connection targets" -ForegroundColor Gray
-Write-Host "  8. Shadow IT/Lifecycle— stale assets, unmanaged flows, top creators" -ForegroundColor Gray
-Write-Host "  9. App Details        — select app, view all properties + connectors" -ForegroundColor Gray
-Write-Host " 10. Flow Details       — select flow, view info + actions + triggers" -ForegroundColor Gray
-Write-Host " 11. Environment Details— select env, view info + apps + flows" -ForegroundColor Gray
-Write-Host " 12. DLP Policy Details — select policy, view info + connector rules" -ForegroundColor Gray
+Write-Host "16 Pages (1 command center + 6 domain + 3 intelligence + 6 detail):" -ForegroundColor Yellow
+Write-Host "  Tier 1 - Command Center:" -ForegroundColor Cyan
+Write-Host "   1. Executive Command Center — governance score, flow health, security coverage" -ForegroundColor Gray
+Write-Host "  Tier 2 - Domain Governance:" -ForegroundColor Cyan
+Write-Host "   2. Environment Health       — types, capacity, security rate, unsecured envs" -ForegroundColor Gray
+Write-Host "   3. App Portfolio            — types, owners, staleness, solution awareness" -ForegroundColor Gray
+Write-Host "   4. Flow Operations          — states, suspension, triggers, activity trends" -ForegroundColor Gray
+Write-Host "   5. Copilot Agents           — types, auth modes, components, creators" -ForegroundColor Gray
+Write-Host "   6. Connector & DLP Gov.     — tiers, flow usage, DLP classifications" -ForegroundColor Gray
+Write-Host "   7. Endpoint & API Security  — HTTP types, endpoint domains, action details" -ForegroundColor Gray
+Write-Host "  Tier 3 - Risk & Intelligence:" -ForegroundColor Cyan
+Write-Host "   8. Risk & Shadow IT         — orphans, staleness, shadow IT rate, risk matrix" -ForegroundColor Gray
+Write-Host "   9. Maker Activity           — concentration, ownership, maker directory" -ForegroundColor Gray
+Write-Host "  10. Connection Intelligence  — status, shared connections, top connectors" -ForegroundColor Gray
+Write-Host "  Tier 4 - Detail/Drill-Down:" -ForegroundColor Cyan
+Write-Host "  11. Environment Detail       — select env, view apps/flows/agents" -ForegroundColor Gray
+Write-Host "  12. App Detail               — select app, view properties + connectors" -ForegroundColor Gray
+Write-Host "  13. Flow Detail              — select flow, view actions + triggers" -ForegroundColor Gray
+Write-Host "  14. Agent Detail             — select agent, view info + components" -ForegroundColor Gray
+Write-Host "  15. DLP Policy Detail        — select policy, view rules" -ForegroundColor Gray
+Write-Host "  16. Connector Detail         — select connector, view connections + flow refs" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Key Governance Measures:" -ForegroundColor Yellow
-Write-Host "  - Governance Score (weighted composite of security, suspension, staleness, DLP)" -ForegroundColor Gray
-Write-Host "  - Env Security Rate, Suspension Rate, Stale App/Flow Rate" -ForegroundColor Gray
-Write-Host "  - Orphaned Apps, Bypass Consent, Widely Shared, Unmanaged Flows" -ForegroundColor Gray
-Write-Host "  - DLP Coverage Rate, Blocked Connector Rate, Connector Utilization" -ForegroundColor Gray
+Write-Host "  - Governance Score (weighted: security + DLP + flow health + solutions + lifecycle)" -ForegroundColor Gray
+Write-Host "  - Shadow IT Rate, Flow Health Rate, Security Coverage" -ForegroundColor Gray
+Write-Host "  - Orphaned Apps/Flows, Stale Assets, Bypass Consent, Unmanaged Flows" -ForegroundColor Gray
+Write-Host "  - DLP Coverage Rate, Connector Utilization, Overall Solution Coverage" -ForegroundColor Gray
 Write-Host ""
-Write-Host "Relationships (auto-configured):" -ForegroundColor Yellow
-Write-Host "  Apps -> Environments (EnvironmentId)" -ForegroundColor Gray
-Write-Host "  Flows -> Environments (EnvironmentId)" -ForegroundColor Gray
-Write-Host "  Connectors -> Environments (EnvironmentId)" -ForegroundColor Gray
-Write-Host "  DlpConnectorRules -> DlpPolicies (PolicyId)" -ForegroundColor Gray
-Write-Host "  UsageAnalytics -> Environments (EnvironmentId)" -ForegroundColor Gray
-Write-Host "  AppConnectorRefs -> Apps (AppId)" -ForegroundColor Gray
-Write-Host "  FlowActions -> Flows (FlowKey)" -ForegroundColor Gray
-Write-Host "  FlowTriggers -> Flows (FlowKey)" -ForegroundColor Gray
-Write-Host "  FlowConnectionRefs -> Flows (FlowKey)" -ForegroundColor Gray
+Write-Host "Tables (14): Environments, Apps, Flows, Connectors, DlpPolicies," -ForegroundColor Yellow
+Write-Host "  DlpConnectorRules, UsageAnalytics, AppConnectorRefs, FlowActions," -ForegroundColor Gray
+Write-Host "  FlowTriggers, FlowConnectionRefs, CopilotAgents, CopilotComponents," -ForegroundColor Gray
+Write-Host "  Connections (NEW)" -ForegroundColor Green
+Write-Host ""
+Write-Host "Relationships (12 auto-configured):" -ForegroundColor Yellow
+Write-Host "  Apps -> Environments | Flows -> Environments | Connectors -> Environments" -ForegroundColor Gray
+Write-Host "  DlpConnectorRules -> DlpPolicies | UsageAnalytics -> Environments" -ForegroundColor Gray
+Write-Host "  AppConnectorRefs -> Apps | FlowActions -> Flows | FlowTriggers -> Flows" -ForegroundColor Gray
+Write-Host "  FlowConnectionRefs -> Flows | CopilotAgents -> Environments" -ForegroundColor Gray
+Write-Host "  CopilotComponents -> CopilotAgents | Connections -> Environments (NEW)" -ForegroundColor Green
 Write-Host ""
