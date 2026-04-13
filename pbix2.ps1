@@ -956,7 +956,7 @@ $tCopilotAgents = [ordered]@{
 $tCopilotComponents = [ordered]@{
     name = "CopilotComponents"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "ComponentId" "string" "none" $null $true)
+        (New-ColumnDef "ComponentId" "string" "none" $null $false)
         (New-ColumnDef "AgentKey" "string" "none" $null $false $true)
         (New-ColumnDef "BotId" "string" "none" $null $false $true)
         (New-ColumnDef "BotName")
