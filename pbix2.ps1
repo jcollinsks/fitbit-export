@@ -1013,7 +1013,8 @@ $tCopilotComponents = [ordered]@{
 $tConnections = [ordered]@{
     name = "Connections"; lineageTag = (New-Guid)
     columns = @(
-        (New-ColumnDef "ConnectionId" "string" "none" -IsKey $true)
+        (New-ColumnDef "ConnectionKey" "string" "none" -IsKey $true)
+        (New-ColumnDef "ConnectionId" "string" "none")
         (New-ColumnDef "ConnectorId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentId" "string" "none" $null $false $true)
         (New-ColumnDef "EnvironmentName")
@@ -1028,13 +1029,17 @@ $tConnections = [ordered]@{
         (New-ColumnDef "CollectedAt" "dateTime")
     )
     partitions = @((New-CsvPartition "Connections" @(
-        @{Name="ConnectionId"; Type="type text"}, @{Name="ConnectorId"; Type="type text"},
+        @{Name="ConnectionKey"; Type="type text"}, @{Name="ConnectionId"; Type="type text"},
+        @{Name="ConnectorId"; Type="type text"},
         @{Name="EnvironmentId"; Type="type text"}, @{Name="EnvironmentName"; Type="type text"},
         @{Name="DisplayName"; Type="type text"}, @{Name="ConnectionUrl"; Type="type text"},
         @{Name="CreatedByObjectId"; Type="type text"}, @{Name="CreatedByName"; Type="type text"},
         @{Name="CreatedByEmail"; Type="type text"}, @{Name="CreatedTime"; Type="type datetime"},
         @{Name="Status"; Type="type text"}, @{Name="IsShared"; Type="type logical"},
         @{Name="CollectedAt"; Type="type datetime"}
+    ) @(
+        '    AddKey = Table.AddColumn(Headers, "ConnectionKey", each [ConnectionId] & "|" & [EnvironmentId]),'
+        '    Deduped = Table.Distinct(AddKey, {"ConnectionKey"}),'
     )))
     measures = @(
         (New-MeasureDef "Total Connections" "COUNTROWS('Connections')" "#,##0" "Connections")
