@@ -509,7 +509,19 @@ foreach ($env in $environments) {
             if ($envConnCount % 1000 -eq 0) {
                 Write-Host "$envConnCount..." -ForegroundColor DarkGray -NoNewline
             }
-            $connId = $c.properties.apiId -replace '.*/apis/', ''
+            $rawApiId = "$($c.properties.apiId)"
+            $connId = if ($rawApiId -and $rawApiId -ne '' -and $rawApiId -match '/apis/') {
+                $rawApiId -replace '.*/apis/', ''
+            } elseif ($rawApiId -and $rawApiId -ne '') {
+                $rawApiId
+            } else {
+                # Fallback: derive connector ID from connection display name or type
+                $dn = "$($c.properties.displayName)"
+                if ($dn -match '^HTTP$|HTTP action|HTTP Raw') { 'shared_http' }
+                elseif ($dn -match 'HTTP with Azure AD') { 'shared_httpwithazuread' }
+                elseif ($dn -match 'HTTP Webhook') { 'shared_httpwebhook' }
+                else { '' }
+            }
             $status = if ($c.properties.statuses -and $c.properties.statuses.Count -gt 0) { $c.properties.statuses[0].status } else { "Unknown" }
 
             # Extract connection URL from connectionParameters or connectionParametersSet
@@ -600,7 +612,7 @@ foreach ($env in $environments) {
             -not $connBaseUrls.ContainsKey($_.name)
         } | Where-Object {
             $cId = $_.properties.apiId -replace '.*/apis/', ''
-            $cId -match 'sendhttp|webcontents|httpwithazuread|httpwebhook|sharepointonline|sql|azuresql|azureblob|azurequeues|azuretables|azurefile|documentdb|dynamicscrmonline'
+            $cId -match 'shared_http$|sendhttp|webcontents|httpwithazuread|httpwebhook|sharepointonline|sql|azuresql|azureblob|azurequeues|azuretables|azurefile|documentdb|dynamicscrmonline'
         })
 
         if ($urlConnections.Count -gt 0) {
