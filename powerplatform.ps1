@@ -35,6 +35,11 @@
     Collect data for a single environment only (by EnvironmentId). Useful for
     testing or quick runs. Get the ID from the Power Platform admin center URL
     or from a previous Environments.csv export.
+.PARAMETER PerEnvironmentTimeoutMin
+    Max minutes to spend on a single environment before skipping to the next.
+    Default 0 = no limit (recommended for large tenants). Set to e.g. 30 or 60
+    if you want a safety net per environment. Individual API calls still have
+    their own 60-second timeouts with retry/backoff regardless of this setting.
 .PARAMETER UseDeviceCode
     Use device code authentication instead of interactive browser login.
     Default is interactive browser (works in most corporate environments).
@@ -50,6 +55,7 @@
     .\powerplatform.ps1 -EnvironmentId "abc-123-def" -IncludeFlowDefinitions
     .\powerplatform.ps1 -Resume
     .\powerplatform.ps1 -IncludePermissions
+    .\powerplatform.ps1 -PerEnvironmentTimeoutMin 60
 #>
 
 param(
@@ -60,7 +66,8 @@ param(
     [switch]$UseDeviceCode,
     [switch]$Resume,
     [int]$MaxFlowDefinitions = 0,
-    [int]$ThrottleLimit = 10
+    [int]$ThrottleLimit = 10,
+    [int]$PerEnvironmentTimeoutMin = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -477,9 +484,8 @@ foreach ($env in $environments) {
         continue
     }
 
-    # --- Per-environment timeout (3 minutes max) ---
+    # --- Per-environment timeout (0 = no limit) ---
     $envStartTime = Get-Date
-    $envTimeoutMin = 10
 
     # --- CONNECTORS & CONNECTIONS (fetched first to build URL lookups for apps and flows) ---
     $connBaseUrls = @{}   # connectionName -> URL (exact match)
@@ -684,9 +690,9 @@ foreach ($env in $environments) {
     }
 
     # --- TIMEOUT CHECK ---
-    if (((Get-Date) - $envStartTime).TotalMinutes -gt $envTimeoutMin) {
-        Write-Host "    TIMEOUT — environment took >$envTimeoutMin min, skipping to next" -ForegroundColor Red
-        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Timeout"; Error="Environment processing exceeded ${envTimeoutMin}m limit"; Timestamp=(Get-Date) })
+    if ($PerEnvironmentTimeoutMin -gt 0 -and ((Get-Date) - $envStartTime).TotalMinutes -gt $PerEnvironmentTimeoutMin) {
+        Write-Host "    TIMEOUT — environment took >$PerEnvironmentTimeoutMin min, skipping to next" -ForegroundColor Red
+        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Timeout"; Error="Environment processing exceeded ${PerEnvironmentTimeoutMin}m limit"; Timestamp=(Get-Date) })
         continue
     }
 
@@ -747,10 +753,10 @@ foreach ($env in $environments) {
     }
 
     # --- TIMEOUT CHECK ---
-    if (((Get-Date) - $envStartTime).TotalMinutes -gt $envTimeoutMin) {
+    if ($PerEnvironmentTimeoutMin -gt 0 -and ((Get-Date) - $envStartTime).TotalMinutes -gt $PerEnvironmentTimeoutMin) {
         Write-Host ""
-        Write-Host "    TIMEOUT — environment took >$envTimeoutMin min, skipping to next" -ForegroundColor Red
-        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Timeout"; Error="Environment processing exceeded ${envTimeoutMin}m limit"; Timestamp=(Get-Date) })
+        Write-Host "    TIMEOUT — environment took >$PerEnvironmentTimeoutMin min, skipping to next" -ForegroundColor Red
+        $errors.Add([PSCustomObject]@{ EnvironmentId=$envId; EnvironmentName=$env.DisplayName; Phase="Timeout"; Error="Environment processing exceeded ${PerEnvironmentTimeoutMin}m limit"; Timestamp=(Get-Date) })
         continue
     }
 
