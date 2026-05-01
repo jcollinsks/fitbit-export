@@ -1923,11 +1923,15 @@ $modelBim = [ordered]@{
             (New-RelationshipDef "rel_AppPerms_Env" "AppPermissions" "EnvironmentId" "Environments" "EnvironmentId")
             # NEW: Errors relationship
             (New-RelationshipDef "rel_Errors_Env" "Errors" "EnvironmentId" "Environments" "EnvironmentId")
-            # NEW: ConnectorKey relationships (cross-env connector dim)
-            (New-RelationshipDef "rel_AppConnRefs_Connectors" "AppConnectorRefs" "ConnectorKey" "Connectors" "ConnectorKey")
-            (New-RelationshipDef "rel_FlowActions_Connectors" "FlowActions" "ConnectorKey" "Connectors" "ConnectorKey")
-            (New-RelationshipDef "rel_FlowTriggers_Connectors" "FlowTriggers" "ConnectorKey" "Connectors" "ConnectorKey")
-            (New-RelationshipDef "rel_Connections_Connectors" "Connections" "ConnectorRefKey" "Connectors" "ConnectorKey")
+            # NEW: ConnectorKey relationships (cross-env connector dim) — INACTIVE to
+            # avoid ambiguous paths to Environments. The active path is via Apps/Flows/
+            # Connections (which already carry EnvironmentId). Measures that want to
+            # filter through Connectors properties (Tier, Publisher, RiskCategory) can
+            # call USERELATIONSHIP to enable the connector-side path on demand.
+            (New-InactiveRelationshipDef "rel_AppConnRefs_Connectors" "AppConnectorRefs" "ConnectorKey" "Connectors" "ConnectorKey")
+            (New-InactiveRelationshipDef "rel_FlowActions_Connectors" "FlowActions" "ConnectorKey" "Connectors" "ConnectorKey")
+            (New-InactiveRelationshipDef "rel_FlowTriggers_Connectors" "FlowTriggers" "ConnectorKey" "Connectors" "ConnectorKey")
+            (New-InactiveRelationshipDef "rel_Connections_Connectors" "Connections" "ConnectorRefKey" "Connectors" "ConnectorKey")
         )
         expressions = @(
             [ordered]@{
